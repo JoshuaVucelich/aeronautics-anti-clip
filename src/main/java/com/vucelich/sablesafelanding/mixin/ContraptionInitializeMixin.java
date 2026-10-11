@@ -19,7 +19,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(value = AbstractContraptionEntity.class, priority = 1100, remap = false)
 public abstract class ContraptionInitializeMixin {
-    @Inject(method = "sable$contraptionInitialize", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
+    /**
+     * Sable 2.0.3's handler never reads its {@code CallbackInfo}, so Mixin strips that argument
+     * and the method on the class is {@code sable$contraptionInitialize()V}. The descriptor with
+     * {@code CallbackInfo} is kept as a second optional target for a build that still has it.
+     */
+    @Inject(method = "sable$contraptionInitialize()V", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
     private void sableSafeLanding$skipOwnedInit(CallbackInfo ci) {
         AbstractContraptionEntity entity = (AbstractContraptionEntity) (Object) this;
         ColliderFeedRuntime.noteHook(entity);
@@ -27,6 +32,11 @@ public abstract class ContraptionInitializeMixin {
             ColliderFeedRuntime.claim(entity);
             ci.cancel();
         }
+    }
+
+    @Inject(method = "sable$contraptionInitialize(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
+    private void sableSafeLanding$skipOwnedInitWithCallback(CallbackInfo ci) {
+        sableSafeLanding$skipOwnedInit(ci);
     }
 
     @Inject(method = "sable$shouldCollide", at = @At("HEAD"), cancellable = true, require = 0, remap = false)

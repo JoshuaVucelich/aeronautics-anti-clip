@@ -251,10 +251,17 @@ public final class LiveTrial {
         if (ship == null || ship.isRemoved() || contraption == null) {
             return;
         }
+        ship.updateBoundingBox();
         double top = surface + 2.0;
-        double gap = ship.boundingBox().minY() - top;
-        if (Math.abs(gap) > 0.05 || Math.abs(ship.logicalPose().position().x() - contraption.getX()) > 1.5) {
-            shiftShip(level, ship, contraption.getX() - ship.logicalPose().position().x(), top - ship.boundingBox().minY(), contraption.getZ() - ship.logicalPose().position().z());
+        double minY = ship.boundingBox().minY();
+        if (minY == 0.0 && ship.boundingBox().maxY() == 0.0) {
+            minY = ship.logicalPose().position().y() - 0.5;
+        }
+        // A bearing rotates around its own anchor, so the car has to sit off that axis.
+        double xTarget = contraption.getX() + (scene.kind == Kind.BEARING ? 1.0 : 0.0);
+        double gap = minY - top;
+        if (Math.abs(gap) > 0.05 || Math.abs(ship.logicalPose().position().x() - xTarget) > 0.2) {
+            shiftShip(level, ship, xTarget - ship.logicalPose().position().x(), top - minY, contraption.getZ() - ship.logicalPose().position().z());
             seated = true;
         }
         ship.latestLinearVelocity.zero();
@@ -293,7 +300,11 @@ public final class LiveTrial {
         if (ship.isRemoved()) {
             outcome = "removed";
         } else if (scene.kind == Kind.BEARING) {
-            outcome = Math.hypot(dX, dZ) > 0.4 ? "orbited" : "stayed";
+            if (dY < -1.0) {
+                outcome = "fell";
+            } else {
+                outcome = Math.hypot(dX, dZ) > 0.4 ? "orbited" : "stayed";
+            }
         } else if (Math.abs(dAnchor) < 0.2) {
             outcome = "platform-did-not-move";
         } else if (Math.abs(dY - dAnchor) < 0.75) {
@@ -331,10 +342,15 @@ public final class LiveTrial {
         place(level, pulleyPos, "create:elevator_pulley", Direction.NORTH);
         for (int x = -1; x <= 1; x++) {
             for (int z = -1; z <= 1; z++) {
+                if (x == 0 && z == 0) {
+                    continue;
+                }
                 level.setBlockAndUpdate(deck.offset(x, 0, z), Blocks.OAK_PLANKS.defaultBlockState());
             }
         }
-        place(level, deck.north(2), "create:redstone_contact", Direction.SOUTH);
+        // The pulley searches the first solid under itself, so the contact has to be that block.
+        place(level, deck, "create:redstone_contact", Direction.SOUTH);
+        log("elevator contact {}", level.getBlockState(deck));
         road(level, base.offset(-6, 1, 0), base.offset(-2, 1, 0));
         // Pulley shaft is the clockwise axis of its facing: north -> X.
         motor(level, pulleyPos.west(), Direction.EAST);
@@ -364,15 +380,20 @@ public final class LiveTrial {
             }
         }
         // Facing up with axis_along_first false puts the shaft on Z.
-        motor(level, base.north(), Direction.SOUTH);
+        // Positive generated speed retracts an upward piston, which is already retracted.
+        motor(level, base.north(), Direction.SOUTH, -32);
         log("piston state {} pole {}", level.getBlockState(base), level.getBlockState(base.below()));
         return level.getBlockEntity(base);
     }
 
     private static void motor(ServerLevel level, BlockPos pos, Direction facing) {
+        motor(level, pos, facing, 32);
+    }
+
+    private static void motor(ServerLevel level, BlockPos pos, Direction facing, int speed) {
         place(level, pos, "create:creative_motor", facing);
         if (level.getBlockEntity(pos) instanceof CreativeMotorBlockEntity motor && motor.generatedSpeed != null) {
-            motor.generatedSpeed.setValue(32);
+            motor.generatedSpeed.setValue(speed);
             motor.updateGeneratedRotation();
             log("motor at {} generates {}", pos, motor.getGeneratedSpeed());
         }
