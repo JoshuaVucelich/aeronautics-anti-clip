@@ -159,23 +159,6 @@ public final class CarryGate {
         return null;
     }
 
-    /**
-     * Shortest signed step, in radians, in {@code (-pi, pi]}.
-     * Matches {@code Mth.wrapDegrees} on the degree value, including the float rounding
-     * that helper uses. A bearing that wraps through 360 degrees is a few degrees, not a spike.
-     */
-    public static double wrapRadians(double radians) {
-        float degrees = (float) Math.toDegrees(radians);
-        degrees %= 360.0f;
-        if (degrees >= 180.0f) {
-            degrees -= 360.0f;
-        }
-        if (degrees < -180.0f) {
-            degrees += 360.0f;
-        }
-        return Math.toRadians(degrees);
-    }
-
     /** A placement of this size is still a ride. A larger one is refused. */
     public static boolean safeStep(double distance, double angleRadians) {
         return Double.isFinite(distance)

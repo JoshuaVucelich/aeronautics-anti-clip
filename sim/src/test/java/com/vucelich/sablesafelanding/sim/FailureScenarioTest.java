@@ -120,7 +120,7 @@ class FailureScenarioTest {
     void aBearingThatTurnsThroughSeveralRevolutionsDoesNotSpikeOnTheWrap() {
         double rawWrap = Math.toRadians(10.0 - 350.0);
         assertFalse(CarryGate.safeStep(0.0, rawWrap));
-        double wrapped = CarryGate.wrapRadians(rawWrap);
+        double wrapped = wrapDegreesRadians(rawWrap);
         assertTrue(CarryGate.safeStep(0.0, wrapped));
         assertEquals(20.0, Math.toDegrees(wrapped), 0.05);
 
@@ -135,7 +135,7 @@ class FailureScenarioTest {
             for (int deg = 0; deg < 360; deg += 10) {
                 double next = Math.toRadians((deg + 10) % 360);
                 double raw = next - placed;
-                double step = CarryGate.wrapRadians(raw);
+                double step = wrapDegreesRadians(raw);
                 if (deg == 350) {
                     assertFalse(CarryGate.safeStep(0.05, raw));
                 }
@@ -257,5 +257,18 @@ class FailureScenarioTest {
         assertTrue(FailureGuards.run(() -> {
         }));
         assertFalse(FailureGuards.run(null));
+    }
+
+    /** Float wrap matching {@code Mth.wrapDegrees}, which is what the bearing step uses. */
+    private static double wrapDegreesRadians(double radians) {
+        float degrees = (float) Math.toDegrees(radians);
+        degrees %= 360.0f;
+        if (degrees >= 180.0f) {
+            degrees -= 360.0f;
+        }
+        if (degrees < -180.0f) {
+            degrees += 360.0f;
+        }
+        return Math.toRadians(degrees);
     }
 }

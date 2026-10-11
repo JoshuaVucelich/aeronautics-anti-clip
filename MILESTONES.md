@@ -53,6 +53,6 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - Rescue is not applied inside a portal, is not taken from another dimension, and walks a buried target up to clear air or skips it. Rescue velocity is zero. A disassembled deck clears only a non-finite or absurd speed.
 - `enabled` is the master switch. `/anticlip status`, `/anticlip off`, and `/anticlip on` read and save it. Mixin configs are optional (`require = 0`) and hook bodies swallow a thrown callback. Those warnings are rate-limited.
 - A bearing step is the wrapped angle, so a continuous turn through 360 degrees stays inside the spike cap. Passengers rotate with that step. A ship whose center is outside the hull is not a passenger.
-- `/anticlip off` clears `sable$initialized` so Sable adds its kinematic collider again. Rescue refuses a cell that contains liquid, scans every block of the ship for a portal, and the clamp query is world blocks only.
+- `/anticlip off`, and turning the feed off in the config, clears `sable$initialized` for every claim, including one that was never uploaded. Rescue refuses a cell that contains liquid. A portal check runs only when a rescue is about to fire, on the bottom layer, skipping unloaded columns, and stops at 256 columns. The clamp query is world blocks only.
 - Repro: `FailureScenarioTest`.
-- Version `0.6.0-rc.26` jar. Still not published to Modrinth or CurseForge.
+- Version `0.6.0-rc.27` jar. Still not published to Modrinth or CurseForge.

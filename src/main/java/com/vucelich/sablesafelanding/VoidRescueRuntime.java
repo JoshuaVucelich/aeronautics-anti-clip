@@ -127,12 +127,6 @@ public final class VoidRescueRuntime {
             if (!SafeLandingConfig.running()) {
                 return false;
             }
-            BoundingBox3dc earlyBox = subLevel.boundingBox();
-            Aabb earlyBounds = new Aabb(earlyBox.minX(), earlyBox.minY(), earlyBox.minZ(), earlyBox.maxX(), earlyBox.maxY(), earlyBox.maxZ());
-            if (RescueSite.defer(inPortal(server, earlyBounds))) {
-                logPortal(subLevel.getUniqueId());
-                return false;
-            }
             AntiClipConfig config = SafeLandingConfig.snapshot();
             String dimension = subLevel.getLevel().dimension().location().toString();
             long time = subLevel.getLevel().getGameTime();
@@ -162,6 +156,10 @@ public final class VoidRescueRuntime {
                 }
             }
             if (!after.rescued()) {
+                return false;
+            }
+            if (RescueSite.defer(inPortal(server, before.bounds()))) {
+                logPortal(subLevel.getUniqueId());
                 return false;
             }
             after = acceptRescue(server, after);
@@ -358,20 +356,37 @@ public final class VoidRescueRuntime {
         );
     }
 
+    /** Bottom-layer columns read when a rescue is about to fire. A hull is not scanned every tick. */
+    private static final int PORTAL_SCAN_CAP = 256;
+
+    /**
+     * Portal blocks on the bottom layer of the ship. Unloaded columns are skipped so the check
+     * does not force a chunk load. The walk stops at {@link #PORTAL_SCAN_CAP}.
+     */
     private static boolean inPortal(ServerLevel level, Aabb box) {
         if (box == null || !box.finite()) {
             return false;
         }
         int minX = (int) Math.floor(box.minX());
-        int minY = (int) Math.floor(box.minY());
+        int y = (int) Math.floor(box.minY());
         int minZ = (int) Math.floor(box.minZ());
         int maxX = (int) Math.floor(box.maxX());
-        int maxY = (int) Math.floor(box.maxY());
         int maxZ = (int) Math.floor(box.maxZ());
-        for (BlockPos pos : BlockPos.betweenClosed(minX, minY, minZ, maxX, maxY, maxZ)) {
-            BlockState state = level.getBlockState(pos);
-            if (state.is(Blocks.NETHER_PORTAL) || state.is(Blocks.END_PORTAL) || state.is(Blocks.END_GATEWAY)) {
-                return true;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        int checked = 0;
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                if (checked++ >= PORTAL_SCAN_CAP) {
+                    return false;
+                }
+                pos.set(x, y, z);
+                if (!level.isLoaded(pos)) {
+                    continue;
+                }
+                BlockState state = level.getBlockState(pos);
+                if (state.is(Blocks.NETHER_PORTAL) || state.is(Blocks.END_PORTAL) || state.is(Blocks.END_GATEWAY)) {
+                    return true;
+                }
             }
         }
         return false;

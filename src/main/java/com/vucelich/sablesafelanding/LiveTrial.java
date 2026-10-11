@@ -280,11 +280,12 @@ public final class LiveTrial {
                 disarmFeed(level, scene);
             }
             if (scene.tail == Tail.DISARM && step == 16 && contraption != null) {
-                log("{} sable back tracked={} sableInitialized={} claimed={}",
+                log("{} sable back tracked={} sableInitialized={} claimed={} pipeline={}",
                         scene.name,
                         ColliderFeedRuntime.tracked(level).size(),
                         ColliderFeedRuntime.sableInitialized(contraption),
-                        ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()));
+                        ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()),
+                        ColliderFeedRuntime.pipelineBodies(level));
             }
             if (scene.tail == Tail.PILOT && phaseTick >= reportAt && ship != null && !ship.isRemoved()) {
                 if (phaseTick == reportAt) {
@@ -549,6 +550,7 @@ public final class LiveTrial {
 
     /** Turns the master switch off after the feed has claimed the elevator, so Sable's collider is what pushes. */
     private static void disarmFeed(ServerLevel level, Scene scene) {
+        int before = ColliderFeedRuntime.pipelineBodies(level);
         try {
             level.getServer().getCommands().performPrefixedCommand(
                     level.getServer().createCommandSourceStack(),
@@ -557,6 +559,8 @@ public final class LiveTrial {
         } catch (RuntimeException ex) {
             log("{} anticlip off failed {}", scene.name, ex.toString());
         }
+        int after = ColliderFeedRuntime.pipelineBodies(level);
+        log("{} pipeline before={} after={}", scene.name, before, after);
         log("{} disarmed tracked={} sableInitialized={} claimed={}",
                 scene.name,
                 ColliderFeedRuntime.tracked(level).size(),

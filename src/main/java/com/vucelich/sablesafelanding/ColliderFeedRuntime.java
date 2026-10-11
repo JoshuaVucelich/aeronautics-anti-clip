@@ -34,6 +34,8 @@ public final class ColliderFeedRuntime {
     private static final Map<String, Map<String, FedContraptionCollider>> FED = new HashMap<>();
     private static final Set<String> HOOKED = new HashSet<>();
     private static final Set<String> CLAIMED = new HashSet<>();
+    /** Claimed contraptions, including ones whose collider was never uploaded. */
+    private static final Map<String, AbstractContraptionEntity> CLAIMS = new HashMap<>();
     private static final Set<String> KINEMATIC_LOGGED = new HashSet<>();
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static boolean deferredWarning;
@@ -55,7 +57,9 @@ public final class ColliderFeedRuntime {
      */
     public static void claim(AbstractContraptionEntity entity) {
         if (onServerThread(entity)) {
-            CLAIMED.add(entity.getUUID().toString());
+            String id = entity.getUUID().toString();
+            CLAIMED.add(id);
+            CLAIMS.put(id, entity);
         }
     }
 
@@ -108,6 +112,7 @@ public final class ColliderFeedRuntime {
         FED.clear();
         HOOKED.clear();
         CLAIMED.clear();
+        CLAIMS.clear();
         KINEMATIC_LOGGED.clear();
     }
 
@@ -116,8 +121,8 @@ public final class ColliderFeedRuntime {
         Map<String, FedContraptionCollider> fed = FED.remove(dimension);
         if (fed != null) {
             HOOKED.removeAll(fed.keySet());
-            CLAIMED.removeAll(fed.keySet());
         }
+        restoreClaims(dimension);
     }
 
     private static boolean onServerThread(AbstractContraptionEntity entity) {
@@ -157,7 +162,9 @@ public final class ColliderFeedRuntime {
             return;
         }
         try {
-            if (!SafeLandingConfig.snapshot().enabled()) {
+            AntiClipConfig config = SafeLandingConfig.snapshot();
+            // A config edit can turn the master switch or the feed off without the command.
+            if (!config.enabled() || !config.feedColliders()) {
                 disarm(level);
                 return;
             }
@@ -168,8 +175,9 @@ public final class ColliderFeedRuntime {
     }
 
     /**
-     * Drops colliders this mod added in one level. Used by the master switch.
-     * Claims for those ids are released so Sable's own collider is no longer suppressed.
+     * Drops colliders this mod added in one level. Used by the master switch and by turning the
+     * feed off. Every claim in the level is restored, including a contraption that was displaced
+     * before its collider was uploaded.
      */
     public static void disarm(ServerLevel level) {
         try {
@@ -177,26 +185,79 @@ public final class ColliderFeedRuntime {
             SubLevelPhysicsSystem system = SubLevelPhysicsSystem.get(level);
             PhysicsPipeline pipeline = system == null ? null : system.getPipeline();
             Map<String, FedContraptionCollider> fed = FED.remove(dimension);
-            if (fed == null) {
-                return;
-            }
-            for (Map.Entry<String, FedContraptionCollider> entry : fed.entrySet()) {
-                CLAIMED.remove(entry.getKey());
-                HOOKED.remove(entry.getKey());
-                FedContraptionCollider collider = entry.getValue();
-                if (pipeline != null && collider != null) {
-                    try {
-                        pipeline.remove(collider);
-                    } catch (RuntimeException ex) {
-                        logFailure(ex);
+            if (fed != null) {
+                for (Map.Entry<String, FedContraptionCollider> entry : fed.entrySet()) {
+                    HOOKED.remove(entry.getKey());
+                    FedContraptionCollider collider = entry.getValue();
+                    if (pipeline != null && collider != null) {
+                        try {
+                            pipeline.remove(collider);
+                        } catch (RuntimeException ex) {
+                            logFailure(ex);
+                        }
                     }
                 }
-                if (collider != null) {
-                    restoreSable(collider.entity());
-                }
             }
+            restoreClaims(dimension);
         } catch (RuntimeException ex) {
             logFailure(ex);
+        }
+    }
+
+    /** Sub-levels plus kinematic contraptions currently in the level pipeline. */
+    public static int pipelineBodies(ServerLevel level) {
+        try {
+            SubLevelPhysicsSystem system = SubLevelPhysicsSystem.get(level);
+            PhysicsPipeline pipeline = system == null ? null : system.getPipeline();
+            if (pipeline == null) {
+                return 0;
+            }
+            int count = 0;
+            boolean found = false;
+            Class<?> type = pipeline.getClass();
+            while (type != null) {
+                for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                    String name = field.getName();
+                    if (!name.equals("activeSubLevels") && !name.equals("activeContraptions")) {
+                        continue;
+                    }
+                    field.setAccessible(true);
+                    count += mapSize(field.get(pipeline));
+                    found = true;
+                }
+                type = type.getSuperclass();
+            }
+            return found ? count : 0;
+        } catch (ReflectiveOperationException ex) {
+            return 0;
+        }
+    }
+
+    private static int mapSize(Object value) throws ReflectiveOperationException {
+        if (value instanceof Map<?, ?> map) {
+            return map.size();
+        }
+        if (value == null) {
+            return 0;
+        }
+        Object result = value.getClass().getMethod("size").invoke(value);
+        return result instanceof Integer count ? count : 0;
+    }
+
+    private static void restoreClaims(String dimension) {
+        List<String> ids = new ArrayList<>();
+        for (Map.Entry<String, AbstractContraptionEntity> entry : CLAIMS.entrySet()) {
+            AbstractContraptionEntity entity = entry.getValue();
+            if (entity != null && entity.level() instanceof ServerLevel server
+                    && server.dimension().location().toString().equals(dimension)) {
+                ids.add(entry.getKey());
+            }
+        }
+        for (String id : ids) {
+            AbstractContraptionEntity entity = CLAIMS.remove(id);
+            CLAIMED.remove(id);
+            HOOKED.remove(id);
+            restoreSable(entity);
         }
     }
 
@@ -252,8 +313,12 @@ public final class ColliderFeedRuntime {
         return null;
     }
 
-    /** Forgets every claim so a killed switch cannot keep suppressing Sable. */
+    /** Restores every claim, uploaded or not, so a killed switch cannot keep suppressing Sable. */
     public static void releaseClaims() {
+        for (AbstractContraptionEntity entity : CLAIMS.values()) {
+            restoreSable(entity);
+        }
+        CLAIMS.clear();
         CLAIMED.clear();
     }
 
