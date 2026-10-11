@@ -67,14 +67,25 @@ public final class CarryGate {
         };
     }
 
+    /** Blocks above the deck before the lower takeoff bar applies. */
+    public static final double TAKEOFF_CLEARANCE = 1.0;
+    /**
+     * Upward speed, in blocks per second, that can start a takeoff while the hull is still on
+     * the blocks. A descending deck's contact readback sits near half a block per second, so
+     * that nudge must not release the car. Thrust from a key other than the movement keys is
+     * faster than this and counts before the hull is clear.
+     */
+    public static final double ON_DECK_SPEED = 2.0;
+
     /**
      * Consecutive ticks the ship is climbing faster than the deck.
-     * The streak starts from that relative upward speed while the car is still on the blocks,
-     * so thrust that is not a movement key can leave without being pulled back.
-     * A tick that is not faster than the deck resets the streak, including a one-tick solver pop.
+     * While the hull is still on the blocks the bar is {@link #ON_DECK_SPEED}, so thrust counts
+     * and the contact nudge does not. Once the hull is clear, {@link AntiClipStep#TAKEOFF_SPEED}
+     * is enough. A tick that is not faster than the deck resets the streak.
      */
-    public static int nextTakeoff(int streak, double upwardSpeed, double deckUpSpeed) {
-        if (upwardSpeed > AntiClipStep.TAKEOFF_SPEED && upwardSpeed > deckUpSpeed + AntiClipStep.TAKEOFF_SPEED) {
+    public static int nextTakeoff(int streak, double upwardSpeed, double deckUpSpeed, boolean clearOfDeck) {
+        double bar = clearOfDeck ? AntiClipStep.TAKEOFF_SPEED : ON_DECK_SPEED;
+        if (upwardSpeed > bar && upwardSpeed > deckUpSpeed + bar) {
             return streak + 1;
         }
         return 0;

@@ -370,7 +370,7 @@ public final class CarryRuntime {
         }
         // Count a climb before any placement. Thrust during the confirm must not be snapped back
         // on the tick the lock becomes a capture.
-        noteTakeoff(lock, ship);
+        noteTakeoff(lock, ship, supports);
         if (lock.takeoffTicks >= CarryGate.TAKEOFF_TICKS) {
             Vector3dc velocity = ship.latestLinearVelocity;
             SableSafeLanding.LOGGER.info(
@@ -423,13 +423,33 @@ public final class CarryRuntime {
      * {@code lastAnchorY} moves with the deck so the next tick is one tick of motion, not the
      * whole ride since capture.
      */
-    private static void noteTakeoff(DeckLock lock, ServerSubLevel ship) {
+    private static void noteTakeoff(DeckLock lock, ServerSubLevel ship, List<SupportMotion> supports) {
         net.minecraft.world.phys.Vec3 anchor = lock.contraption.getAnchorVec();
         double deckUp = (anchor.y - lock.lastAnchorY) * 20.0;
         lock.lastAnchorY = anchor.y;
         Vector3dc velocity = ship.latestLinearVelocity;
         double upward = velocity == null ? 0.0 : velocity.y();
-        lock.takeoffTicks = CarryGate.nextTakeoff(lock.takeoffTicks, upward, deckUp);
+        boolean clear = clearance(ship, forId(supports, lock.contraptionId)) > CarryGate.TAKEOFF_CLEARANCE;
+        lock.takeoffTicks = CarryGate.nextTakeoff(lock.takeoffTicks, upward, deckUp, clear);
+    }
+
+    /** Positive when the hull is above the deck. No horizontal overlap counts as clear. */
+    private static double clearance(ServerSubLevel ship, List<SupportMotion> supports) {
+        if (supports.isEmpty()) {
+            return Double.POSITIVE_INFINITY;
+        }
+        BoundingBox3dc box = ship.boundingBox();
+        Aabb body = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+        double best = Double.POSITIVE_INFINITY;
+        boolean overlapped = false;
+        for (SupportMotion support : supports) {
+            if (!body.overlapsHorizontally(support.volume())) {
+                continue;
+            }
+            overlapped = true;
+            best = Math.min(best, box.minY() - support.volume().maxY());
+        }
+        return overlapped ? best : Double.POSITIVE_INFINITY;
     }
 
     private static CarryGate.Reason releaseReason(
@@ -448,7 +468,7 @@ public final class CarryRuntime {
         double angle = Math.toRadians(deckAngle(lock.contraption));
         double anchorDelta = distance(anchor.x, anchor.y, anchor.z, lock.lastAnchorX, lock.lastAnchorY, lock.lastAnchorZ);
         lock.idleTicks = CarryGate.nextIdle(lock.idleTicks, anchorDelta, Math.abs(angle - lock.lastAngle));
-        noteTakeoff(lock, ship);
+        noteTakeoff(lock, ship, supports);
         lock.lastAnchorX = anchor.x;
         lock.lastAnchorY = anchor.y;
         lock.lastAnchorZ = anchor.z;

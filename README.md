@@ -25,7 +25,7 @@ The sim module does not start Minecraft or link Rapier.
 ./gradlew build
 ```
 
-The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.6.0-rc.22`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
+The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.6.0-rc.23`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
 
 A dedicated server started with `-Dsable_safe_landing.live=true` runs a scripted trial: a sub-level below min build height, a sub-level at Sable's remove bound, and a vehicle on an elevator, a bearing, and a piston. It logs lines prefixed with `LIVE` and then stops.
 
@@ -33,7 +33,7 @@ A dedicated server started with `-Dsable_safe_landing.live=true` runs a scripted
 
 Carry is on by default. The collider feed uploads the deck and does not capture or teleport the car.
 
-A lock starts only after a ship block's bottom has stayed on the deck for 5 ticks, within 0.2 blocks. The car is not placed until that confirm finishes. A pass 0.6 blocks above the deck does not count. The lock ends when any of these happen: 8 ticks with no contact, the contraption is removed or disassembled, the deck is idle for 10 ticks, upward speed relative to the deck for 3 ticks, or a player is steering. Thrust that is not a movement key counts toward that release, and the car is not pulled back while the streak is running. An inconclusive scan of a large ship (the 128-block cap) does not count as lost contact.
+A lock starts only after a ship block's bottom has stayed on the deck for 5 ticks, within 0.2 blocks. The car is not placed until that confirm finishes. A pass 0.6 blocks above the deck does not count. The lock ends when any of these happen: 8 ticks with no contact, the contraption is removed or disassembled, the deck is idle for 10 ticks, upward speed relative to the deck for 3 ticks, or a player is steering. While the hull is still on the blocks, that climb has to be faster than the contact readback (2 blocks per second above the deck) so a descending elevator does not look like thrust. The car is not pulled back while the streak is running. An inconclusive scan of a large ship (the 128-block cap) does not count as lost contact.
 
 The server tick places the car only after the confirm, and only once the deck has drifted more than 0.2 blocks or the bearing has turned more than 8 degrees. The placement is `PhysicsPipeline.teleport`. It wakes that body for the correction and does not call `resetVelocity` or zero the ship's velocity. Ticks that do not teleport do not wake, so a parked hull can sleep and a takeoff can climb off.
 

@@ -32,12 +32,14 @@ class CarryGateTest {
     void eachReleaseHasItsOwnReason() {
         assertEquals(CarryGate.Reason.DISASSEMBLED, CarryGate.release(true, true, 9, 20, 20));
         assertEquals(CarryGate.Reason.PILOT, CarryGate.release(false, true, 9, 20, 20));
-        assertEquals(0, CarryGate.nextTakeoff(2, 0.4, 0.0));
-        assertEquals(1, CarryGate.nextTakeoff(0, 1.0, 0.0));
-        assertEquals(0, CarryGate.nextTakeoff(1, 0.6, 0.4));
-        // Thrust while still on the blocks starts the streak. A tick that is not faster resets it.
-        assertEquals(3, CarryGate.nextTakeoff(2, 8.0, 0.0));
-        assertEquals(0, CarryGate.nextTakeoff(2, 0.2, 0.0));
+        assertEquals(0, CarryGate.nextTakeoff(2, 0.4, 0.0, true));
+        assertEquals(1, CarryGate.nextTakeoff(0, 1.0, 0.0, true));
+        assertEquals(0, CarryGate.nextTakeoff(1, 0.6, 0.4, true));
+        // Contact-scale speed on the blocks does not count. Thrust relative to the deck does.
+        assertEquals(0, CarryGate.nextTakeoff(2, 0.6, -0.7, false));
+        assertEquals(3, CarryGate.nextTakeoff(2, 8.0, 0.0, false));
+        assertEquals(1, CarryGate.nextTakeoff(0, 8.0, -0.7, false));
+        assertEquals(0, CarryGate.nextTakeoff(2, 0.2, 0.0, true));
         assertNull(CarryGate.release(false, false, 1, 0, 0));
         assertEquals(CarryGate.Reason.IDLE, CarryGate.release(false, false, 1, 20, 20));
         assertEquals(CarryGate.Reason.TAKEOFF, CarryGate.release(false, false, CarryGate.TAKEOFF_TICKS, 20, 20));
