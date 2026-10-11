@@ -204,7 +204,11 @@ public final class AntiClipStep {
     public static final double MAX_RIDE_STEP = 0.75;
     /** Degrees of platform rotation in one tick. A larger turn is not applied. */
     public static final double MAX_RIDE_DEGREES = 25.0;
-    /** How far above a block top a ship may be and still count as on that block. */
+    /**
+     * How far a ship may be from a block top, above or below, and still count as on that block.
+     * Volumes are taken at the platform's new pose, so an elevator that just rose leaves the
+     * ship a fraction of a block underneath.
+     */
     static final double RIDE_WINDOW = 1.0;
 
     /**
@@ -282,13 +286,14 @@ public final class AntiClipStep {
     }
 
     /**
-     * Resting for the ride uses each block's top, and allows a gap of one block so a single
-     * missed tick does not drop the car off a descending platform.
+     * Resting for the ride uses each block's top. The gap may be a block either way: a descending
+     * platform opens a gap above the ship, and an ascending one is sampled after it has already
+     * moved up through the ship.
      */
     private static boolean ridingOn(BodyState body, SupportMotion support, AntiClipConfig config) {
         double gap = body.bounds().minY() - support.volume().maxY();
-        return gap >= -config.restEpsilon()
-                && gap <= Math.max(config.restEpsilon(), RIDE_WINDOW)
+        return gap >= -RIDE_WINDOW
+                && gap <= RIDE_WINDOW
                 && body.bounds().overlapsHorizontally(support.volume());
     }
 

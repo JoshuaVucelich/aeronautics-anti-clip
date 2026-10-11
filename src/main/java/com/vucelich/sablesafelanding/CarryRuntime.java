@@ -29,8 +29,9 @@ import java.util.Map;
 /**
  * Builds per-block support volumes for the ride. The anchor delta is the motion since the previous
  * game tick, kept for every substep of the current tick so the ship velocity stays at that rate.
- * A delta past the ride cap is dropped here. A kinematic platform cannot pull, so the ride sets
- * the ship's velocity instead of teleporting it by the angle.
+ * A delta past the ride cap is dropped here. The ride records that step; after the physics
+ * solve the ship is placed on it, because a kinematic floor will not pull a car downward and
+ * will cancel a velocity aimed through the collider.
  */
 public final class CarryRuntime {
     private static final net.minecraft.world.phys.Vec3 ROTATION_OFFSET = new net.minecraft.world.phys.Vec3(0.5, 0.5, 0.5);

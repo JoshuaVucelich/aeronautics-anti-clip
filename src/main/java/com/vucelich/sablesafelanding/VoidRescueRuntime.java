@@ -15,6 +15,7 @@ import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
+import dev.ryanhcode.sable.neoforge.event.ForgeSablePostPhysicsTickEvent;
 import dev.ryanhcode.sable.neoforge.event.ForgeSablePrePhysicsTickEvent;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
@@ -24,8 +25,10 @@ import org.joml.Quaterniondc;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -35,7 +38,18 @@ import java.util.UUID;
 public final class VoidRescueRuntime {
     private static final AntiClipStep STEP = new AntiClipStep();
     private static final RateLimiter RESCUE_LOGS = new RateLimiter(5_000_000_000L);
+    private static final RateLimiter BEDROCK_LOGS = new RateLimiter(5_000_000_000L);
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
+    /**
+     * Where a resting ship started this game tick, and the capped platform step for the whole tick.
+     * Post-physics places the ship at {@code start + step * partial}. Rapier is not given that
+     * velocity: a kinematic floor cancels a downward component, and integrating it as well as the
+     * placement would move the ship twice on the way up or around a bearing.
+     */
+    private static final Map<String, PlatformFollow> FOLLOWS = new HashMap<>();
+
+    private record PlatformFollow(long time, Vec3 start, Vec3 step) {
+    }
     private static boolean removalHookSeen;
     private static boolean loggedThread;
     private static int ticksWithShipsBeforeHook;
@@ -53,10 +67,13 @@ public final class VoidRescueRuntime {
 
     public static void clear() {
         STEP.clear();
+        FOLLOWS.clear();
     }
 
     public static void forgetDimension(String dimension) {
         STEP.forgetDimension(dimension);
+        String prefix = dimension + "\u0000";
+        FOLLOWS.keySet().removeIf(key -> key.startsWith(prefix));
     }
 
     private VoidRescueRuntime() {
@@ -227,29 +244,91 @@ public final class VoidRescueRuntime {
         apply(subLevel, pipeline, after, after.rescued());
         if (!after.rescued()) {
             Vector3d desired = new Vector3d(after.velocity().x(), after.velocity().y(), after.velocity().z());
-            if (pipeline != null && slowed) {
-                try {
-                    pipeline.wakeUp(subLevel);
-                    Vector3d current = pipeline.getLinearVelocity(subLevel, new Vector3d());
-                    pipeline.addLinearAndAngularVelocity(
-                            subLevel,
-                            new Vector3d(desired.x - current.x, desired.y - current.y, desired.z - current.z),
-                            new Vector3d()
-                    );
-                } catch (RuntimeException ex) {
-                    logFailure(ex);
-                }
-            }
-            subLevel.latestLinearVelocity.set(desired);
             if (slowed) {
+                String key = subLevel.getLevel().dimension().location().toString() + "\u0000" + subLevel.getUniqueId();
+                PlatformFollow existing = FOLLOWS.get(key);
+                if (existing == null || existing.time != time) {
+                    FOLLOWS.put(key, new PlatformFollow(
+                            time,
+                            before.position(),
+                            after.velocity().mul(1.0 / 20.0)
+                    ));
+                }
                 PlatformTrace.note("ride:" + subLevel.getUniqueId(),
                         String.format(java.util.Locale.ROOT, "vel=(%.2f,%.2f,%.2f) shipMinY=%.2f",
                                 desired.x, desired.y, desired.z, before.bounds().minY()));
             }
+            subLevel.latestLinearVelocity.set(desired);
         }
         subLevel.updateBoundingBox();
         if (after.rescued()) {
             logRescue(subLevel.getUniqueId(), before, after);
+        }
+    }
+
+    /**
+     * After Rapier has moved kinematic colliders and solved contacts, put a resting ship on the
+     * platform pose for this substep. Doing it earlier lets the floor push a descending car back up.
+     */
+    public static void onPostPhysics(ForgeSablePostPhysicsTickEvent event) {
+        SubLevelPhysicsSystem system = event.getPhysicsSystem();
+        if (system == null || !(system.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        if (!level.getServer().isSameThread() || FOLLOWS.isEmpty()) {
+            return;
+        }
+        try {
+            catchUp(level, system.getPipeline(), system.getPartialPhysicsTick());
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+        }
+    }
+
+    private static void catchUp(ServerLevel level, PhysicsPipeline pipeline, double partial) {
+        if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
+            return;
+        }
+        String dimension = level.dimension().location().toString();
+        long time = level.getGameTime();
+        double fraction = Math.max(0.0, Math.min(1.0, partial));
+        for (ServerSubLevel subLevel : container.getAllSubLevels()) {
+            if (subLevel.isRemoved()) {
+                continue;
+            }
+            String key = dimension + "\u0000" + subLevel.getUniqueId();
+            PlatformFollow follow = FOLLOWS.get(key);
+            if (follow == null || follow.time != time || follow.step.lengthSquared() < 1.0e-18) {
+                continue;
+            }
+            Vec3 target = follow.start.add(follow.step.mul(fraction));
+            Vector3dc current = subLevel.logicalPose().position();
+            double dx = target.x() - current.x();
+            double dy = target.y() - current.y();
+            double dz = target.z() - current.z();
+            if (dx * dx + dy * dy + dz * dz > 1.0e-12) {
+                Quaterniond orientation = new Quaterniond(subLevel.logicalPose().orientation());
+                Vector3d position = new Vector3d(target.x(), target.y(), target.z());
+                if (pipeline != null) {
+                    try {
+                        pipeline.teleport(subLevel, position, orientation);
+                        pipeline.resetVelocity(subLevel);
+                    } catch (RuntimeException ex) {
+                        subLevel.logicalPose().position().set(position);
+                        logFailure(ex);
+                    }
+                } else {
+                    subLevel.logicalPose().position().set(position);
+                }
+                subLevel.updateBoundingBox();
+            } else if (pipeline != null) {
+                try {
+                    pipeline.resetVelocity(subLevel);
+                } catch (RuntimeException ex) {
+                    logFailure(ex);
+                }
+            }
+            subLevel.latestLinearVelocity.set(follow.step.x() * 20.0, follow.step.y() * 20.0, follow.step.z() * 20.0);
         }
     }
 
@@ -304,20 +383,24 @@ public final class VoidRescueRuntime {
     }
 
     private static void logRescue(UUID id, BodyState before, BodyState after) {
-        if (!RESCUE_LOGS.tryAcquire(System.nanoTime())) {
-            return;
-        }
         boolean bedrock = before.bounds().finite() && after.position().y() - before.position().y() > 1.0
                 && before.bounds().minY() > -1_000.0;
+        long now = System.nanoTime();
         if (bedrock) {
+            if (!BEDROCK_LOGS.tryAcquire(now)) {
+                return;
+            }
             SableSafeLanding.LOGGER.info(
-                    "Rescued sub-level {} from below bedrock to y {}",
+                    "Rescued sub-level {} from below bedrock to y {} vel=0",
                     id,
                     String.format(java.util.Locale.ROOT, "%.2f", after.bounds().minY())
             );
-        } else {
-            SableSafeLanding.LOGGER.info("Rescued sub-level {} from the void", id);
+            return;
         }
+        if (!RESCUE_LOGS.tryAcquire(now)) {
+            return;
+        }
+        SableSafeLanding.LOGGER.info("Rescued sub-level {} from the void", id);
     }
 
     private static void logFailure(RuntimeException ex) {

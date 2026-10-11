@@ -125,6 +125,21 @@ class CarryTest {
     }
 
     @Test
+    void aShipJustUnderARaisedDeckStillRides() {
+        AntiClipConfig config = AntiClipConfig.defaults().withCarry(false).withFeedColliders(true);
+        BodyState car = carAt(0.0, 10.75, 0.0);
+        SupportMotion raised = support("elevator", new Aabb(-2.0, 10.0, -2.0, 2.0, 11.0, 2.0), new Vec3(0.0, 0.2, 0.0), 0.0);
+        BodyState rode = step(car, List.of(raised), config);
+        assertEquals(10.95, rode.bounds().minY(), 1.0e-9);
+        assertEquals(4.0, rode.velocity().y(), 1.0e-9);
+
+        BodyState buried = carAt(0.0, 9.4, 0.0);
+        BodyState left = step(buried, List.of(raised), config);
+        assertEquals(9.4, left.bounds().minY(), 1.0e-9);
+        assertEquals(0.0, left.velocity().y(), 1.0e-9);
+    }
+
+    @Test
     void aBodyThatIsNotRestingIsLeftBehind() {
         BodyState car = carAt(0.0, 12.5, 0.0);
         SupportMotion elevator = support("elevator", new Aabb(-2.0, 10.0, -2.0, 2.0, 11.0, 2.0), new Vec3(0.0, 0.2, 0.0), 0.0);

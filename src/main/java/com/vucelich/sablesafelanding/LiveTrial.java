@@ -7,6 +7,9 @@ import com.simibubi.create.content.contraptions.bearing.BearingBlock;
 import com.simibubi.create.content.contraptions.bearing.MechanicalBearingBlockEntity;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.content.kinetics.motor.CreativeMotorBlockEntity;
+import com.simibubi.create.content.contraptions.elevator.ElevatorColumn;
+import com.simibubi.create.content.contraptions.elevator.ElevatorContraption;
+import com.simibubi.create.content.contraptions.elevator.ElevatorPulleyBlockEntity;
 import com.simibubi.create.content.contraptions.piston.LinearActuatorBlockEntity;
 import dev.ryanhcode.sable.SableConfig;
 import dev.ryanhcode.sable.api.SubLevelAssemblyHelper;
@@ -49,7 +52,6 @@ import java.util.List;
  */
 public final class LiveTrial {
     private static final boolean ENABLED = Boolean.getBoolean("sable_safe_landing.live");
-    private static final double MOVE_STEP = 0.25;
 
     private enum Kind {
         ELEVATOR, BEARING, PISTON
@@ -59,13 +61,13 @@ public final class LiveTrial {
     }
 
     private static final Scene[] SCENES = {
-            new Scene("elevator-off", Kind.ELEVATOR, false, false, -1, 20),
-            new Scene("elevator-down", Kind.ELEVATOR, true, false, -1, 20),
-            new Scene("elevator-up", Kind.ELEVATOR, true, false, 1, 20),
-            new Scene("elevator-carry", Kind.ELEVATOR, true, true, -1, 20),
+            new Scene("elevator-off", Kind.ELEVATOR, false, false, -1, 48),
+            new Scene("elevator-down", Kind.ELEVATOR, true, false, -1, 48),
+            new Scene("elevator-up", Kind.ELEVATOR, true, false, 1, 48),
+            new Scene("elevator-carry", Kind.ELEVATOR, true, true, -1, 48),
             new Scene("bearing-feed", Kind.BEARING, true, false, 0, 24),
             new Scene("bearing-carry", Kind.BEARING, true, true, 0, 24),
-            new Scene("piston-feed", Kind.PISTON, true, false, 1, 48)
+            new Scene("piston-feed", Kind.PISTON, true, false, 1, 64)
     };
 
     private enum Phase {
@@ -89,6 +91,7 @@ public final class LiveTrial {
     private static double startZ;
     private static double startAnchorY;
     private static boolean seated;
+    private static boolean bedrockNoted;
     private static int activatedAt = -1;
 
     private LiveTrial() {
@@ -271,24 +274,62 @@ public final class LiveTrial {
     }
 
     private static void nudge(Scene scene, int step) {
-        if (contraption == null || scene.direction == 0) {
+        if (contraption == null || !contraption.isAlive()) {
             return;
         }
         if (scene.kind == Kind.BEARING) {
             // The motor already integrates the angle. Overwriting it wraps the sample and flings the car.
             return;
         }
-        if (scene.kind == Kind.PISTON) {
-            // The actuator tick calls resetContraptionToOffset, which undoes a raw setPos.
+        if (scene.kind == Kind.ELEVATOR && step == 1) {
+            // No floor target means movement speed is zero, and the arrived snap writes a raw setPos back.
+            callElevator(scene);
+        }
+        if (step == 1 || step % 16 == 0) {
+            traceActuator(scene);
+        }
+    }
+
+    /**
+     * Ask the elevator column for a floor a few blocks off the current one. Increasing the
+     * target Y raises the car; decreasing it lowers the car. Create integrates the offset.
+     */
+    private static void callElevator(Scene scene) {
+        if (!(controller instanceof ElevatorPulleyBlockEntity pulley) || pulley.movedContraption == null) {
+            log("{} elevator controller missing", scene.name);
             return;
         }
-        // An elevator with no floor target has movement speed near zero. Move the entity itself
-        // and leave the actuator offset alone so the pulley does not write part of the step back.
-        double dy = scene.direction * MOVE_STEP;
-        contraption.setPos(contraption.getX(), contraption.getY() + dy, contraption.getZ());
-        if (step == 1) {
-            log("{} nudge {} per tick for {} ticks", scene.name, dy, scene.moveTicks);
+        if (!(pulley.movedContraption.getContraption() instanceof ElevatorContraption contraption)) {
+            log("{} not an elevator contraption", scene.name);
+            return;
         }
+        ElevatorColumn column = ElevatorColumn.get(pulley.getLevel(), contraption.getGlobalColumn());
+        if (column == null || !column.isTargetAvailable()) {
+            log("{} elevator column missing", scene.name);
+            return;
+        }
+        int current = column.getTargetedYLevel();
+        int next = current + scene.direction * 4;
+        if (contraption.isTargetUnreachable(next)) {
+            log("{} elevator target {} unreachable from {}", scene.name, next, current);
+            return;
+        }
+        column.target(next);
+        log("{} elevator target {} -> {} offset {} speed {}",
+                scene.name, current, next, fmt(pulley.offset), fmt(pulley.getMovementSpeed()));
+    }
+
+    private static void traceActuator(Scene scene) {
+        if (!(controller instanceof LinearActuatorBlockEntity actuator)) {
+            return;
+        }
+        boolean stalled = actuator.movedContraption != null && actuator.movedContraption.isStalled();
+        log("{} actuator offset={} speed={} stalled={} anchorY={}",
+                scene.name,
+                fmt(actuator.offset),
+                fmt(actuator.getMovementSpeed()),
+                stalled,
+                contraption == null ? "none" : fmt(contraption.getAnchorVec().y));
     }
 
     private static void report(Scene scene) {
@@ -311,11 +352,11 @@ public final class LiveTrial {
             } else {
                 outcome = Math.hypot(dX, dZ) > 0.4 ? "orbited" : "stayed";
             }
-        } else if (Math.abs(dAnchor) < 0.2) {
+        } else if (Math.abs(dAnchor) < 1.0) {
             outcome = "platform-did-not-move";
-        } else if (Math.abs(dY - dAnchor) < 0.75) {
+        } else if (Math.abs(dY - dAnchor) <= Math.max(0.5, Math.abs(dAnchor) * 0.25)) {
             outcome = "followed";
-        } else if (dY < dAnchor - 0.75) {
+        } else if (dY < dAnchor - 0.5) {
             outcome = "fell-through";
         } else {
             outcome = "separated";
@@ -341,6 +382,7 @@ public final class LiveTrial {
         double line = level.getMinBuildHeight() - SafeLandingConfig.BEDROCK_MARGIN.getAsDouble() - 8.0;
         if (phaseTick == 0) {
             discardShip();
+            bedrockNoted = false;
             ship = assembleCar(level, new BlockPos(24, surface + 2, 8), false);
             log("bedrock assembled {}", describe(ship));
         } else if (phaseTick == 8) {
@@ -348,6 +390,12 @@ public final class LiveTrial {
             log("bedrock pushed line={} {}", fmt(line), describe(ship));
         } else if (phaseTick == 20) {
             log("bedrock early {}", describe(ship));
+        } else if (!bedrockNoted && phaseTick > 8 && ship != null && !ship.isRemoved()
+                && ship.boundingBox().minY() > level.getMinBuildHeight() - 1.0) {
+            bedrockNoted = true;
+            org.joml.Vector3d velocity = ship.latestLinearVelocity;
+            log("bedrock restored vel=({},{},{}) {}",
+                    fmt(velocity.x), fmt(velocity.y), fmt(velocity.z), describe(ship));
         } else if (phaseTick == 8 + dwell + 8) {
             org.joml.Vector3d velocity = ship == null ? new org.joml.Vector3d() : ship.latestLinearVelocity;
             log("bedrock after dwell removed={} vel=({},{},{}) {}",
@@ -386,6 +434,17 @@ public final class LiveTrial {
     }
 
     private static BlockEntity elevator(ServerLevel level, BlockPos base) {
+        // The deck has to be able to drop several blocks without hitting stone.
+        for (int y = -6; y <= 0; y++) {
+            for (int x = -2; x <= 2; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    BlockPos dug = base.offset(x, y, z);
+                    if (dug.getY() > level.getMinBuildHeight()) {
+                        level.setBlockAndUpdate(dug, Blocks.AIR.defaultBlockState());
+                    }
+                }
+            }
+        }
         BlockPos pulleyPos = base.offset(0, 8, 0);
         BlockPos deck = base.offset(0, 1, 0);
         place(level, pulleyPos, "create:elevator_pulley", Direction.NORTH);
@@ -420,9 +479,22 @@ public final class LiveTrial {
 
     private static BlockEntity piston(ServerLevel level, BlockPos base) {
         place(level, base, "create:sticky_mechanical_piston", Direction.UP);
-        // A retracted piston counts poles on its back, not in front of the head.
-        place(level, base.below(), "create:piston_extension_pole", Direction.UP);
+        // A retracted piston counts poles on its back. One pole stops the head within a block.
+        for (int i = 1; i <= 6; i++) {
+            BlockPos pole = base.below(i);
+            if (pole.getY() <= level.getMinBuildHeight()) {
+                break;
+            }
+            place(level, pole, "create:piston_extension_pole", Direction.UP);
+        }
         BlockPos deck = base.above();
+        for (int y = 2; y <= 8; y++) {
+            for (int x = -2; x <= 2; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    level.setBlockAndUpdate(base.offset(x, y, z), Blocks.AIR.defaultBlockState());
+                }
+            }
+        }
         for (int x = -1; x <= 1; x++) {
             for (int z = -1; z <= 1; z++) {
                 level.setBlockAndUpdate(deck.offset(x, 0, z), Blocks.OAK_PLANKS.defaultBlockState());
