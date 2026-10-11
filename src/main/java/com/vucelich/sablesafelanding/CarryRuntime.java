@@ -92,6 +92,10 @@ public final class CarryRuntime {
                 }
             }
             VoidRescueRuntime.advanceAll(ships, pipeline, supports, event.getTimeStep());
+            // The collider pose for this substep is uploaded at the start of the solve, from this
+            // same partial. Place the ship there first so a descending floor cannot leave it behind
+            // and then push it back up.
+            VoidRescueRuntime.catchUp(level, pipeline, system.getPartialPhysicsTick());
         } catch (RuntimeException ex) {
             logFailure(ex);
         }

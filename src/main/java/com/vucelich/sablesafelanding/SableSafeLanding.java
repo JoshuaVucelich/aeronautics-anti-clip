@@ -21,7 +21,6 @@ public final class SableSafeLanding {
         NeoForge.EVENT_BUS.addListener(VoidRescueRuntime::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(ColliderFeedRuntime::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(CarryRuntime::onPrePhysics);
-        NeoForge.EVENT_BUS.addListener(VoidRescueRuntime::onPostPhysics);
         NeoForge.EVENT_BUS.addListener(SableSafeLanding::onUnload);
         NeoForge.EVENT_BUS.addListener(SableSafeLanding::onStop);
         if (LiveTrial.enabled()) {

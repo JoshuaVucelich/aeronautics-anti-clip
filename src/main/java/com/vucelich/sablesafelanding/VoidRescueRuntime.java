@@ -15,7 +15,6 @@ import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
-import dev.ryanhcode.sable.neoforge.event.ForgeSablePostPhysicsTickEvent;
 import dev.ryanhcode.sable.neoforge.event.ForgeSablePrePhysicsTickEvent;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
@@ -51,6 +50,7 @@ public final class VoidRescueRuntime {
     private record PlatformFollow(long time, Vec3 start, Vec3 step) {
     }
     private static boolean removalHookSeen;
+    private static boolean loggedCatch;
     private static boolean loggedThread;
     private static int ticksWithShipsBeforeHook;
 
@@ -267,25 +267,11 @@ public final class VoidRescueRuntime {
     }
 
     /**
-     * After Rapier has moved kinematic colliders and solved contacts, put a resting ship on the
-     * platform pose for this substep. Doing it earlier lets the floor push a descending car back up.
+     * Put a resting ship on the platform pose this substep is about to solve. The kinematic
+     * collider is uploaded from the same partial at the start of the solve, so the car and the
+     * deck arrive together. A placement after the solve is pushed back out of the deck.
      */
-    public static void onPostPhysics(ForgeSablePostPhysicsTickEvent event) {
-        SubLevelPhysicsSystem system = event.getPhysicsSystem();
-        if (system == null || !(system.getLevel() instanceof ServerLevel level)) {
-            return;
-        }
-        if (!level.getServer().isSameThread() || FOLLOWS.isEmpty()) {
-            return;
-        }
-        try {
-            catchUp(level, system.getPipeline(), system.getPartialPhysicsTick());
-        } catch (RuntimeException ex) {
-            logFailure(ex);
-        }
-    }
-
-    private static void catchUp(ServerLevel level, PhysicsPipeline pipeline, double partial) {
+    public static void catchUp(ServerLevel level, PhysicsPipeline pipeline, double partial) {
         if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
             return;
         }
@@ -311,6 +297,7 @@ public final class VoidRescueRuntime {
                 Vector3d position = new Vector3d(target.x(), target.y(), target.z());
                 if (pipeline != null) {
                     try {
+                        pipeline.wakeUp(subLevel);
                         pipeline.teleport(subLevel, position, orientation);
                         pipeline.resetVelocity(subLevel);
                     } catch (RuntimeException ex) {
@@ -321,6 +308,18 @@ public final class VoidRescueRuntime {
                     subLevel.logicalPose().position().set(position);
                 }
                 subLevel.updateBoundingBox();
+                if (!loggedCatch) {
+                    loggedCatch = true;
+                    SableSafeLanding.LOGGER.info(
+                            "LIVE catch partial={} step=({},{},{}) shipY {} -> {}",
+                            String.format(java.util.Locale.ROOT, "%.2f", fraction),
+                            String.format(java.util.Locale.ROOT, "%.3f", follow.step.x()),
+                            String.format(java.util.Locale.ROOT, "%.3f", follow.step.y()),
+                            String.format(java.util.Locale.ROOT, "%.3f", follow.step.z()),
+                            String.format(java.util.Locale.ROOT, "%.2f", current.y()),
+                            String.format(java.util.Locale.ROOT, "%.2f", target.y())
+                    );
+                }
             } else if (pipeline != null) {
                 try {
                     pipeline.resetVelocity(subLevel);
