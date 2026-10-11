@@ -2,7 +2,10 @@ package com.vucelich.sablesafelanding;
 
 import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.ControlledContraptionEntity;
+import com.simibubi.create.api.contraption.BlockMovementChecks;
+import com.simibubi.create.content.contraptions.AssemblyException;
 import com.simibubi.create.content.contraptions.bearing.BearingBlock;
+import com.simibubi.create.content.contraptions.bearing.BearingContraption;
 import com.simibubi.create.content.contraptions.bearing.MechanicalBearingBlockEntity;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.content.contraptions.piston.LinearActuatorBlockEntity;
@@ -329,11 +332,40 @@ public final class LiveTrial {
                 level.setBlockAndUpdate(deck.offset(x, 0, z), Blocks.OAK_PLANKS.defaultBlockState());
             }
         }
-        log("bearing state {} front {}", level.getBlockState(base), level.getBlockState(base.above()));
+        BlockPos front = base.above();
+        BlockState frontState = level.getBlockState(front);
+        log("bearing state {} front {} necessary {} allowed {} brittle {} emptyShape {}",
+                level.getBlockState(base),
+                frontState,
+                BlockMovementChecks.isMovementNecessary(frontState, level, front),
+                BlockMovementChecks.isMovementAllowed(frontState, level, front),
+                BlockMovementChecks.isBrittle(frontState),
+                frontState.getCollisionShape(level, front).isEmpty());
         if (level.getBlockEntity(base) instanceof MechanicalBearingBlockEntity bearing) {
+            if (bearing instanceof KineticBlockEntity kinetic) {
+                kinetic.setSpeed(16.0f);
+            }
             bearing.assemble();
             if (bearing.getLastAssemblyException() != null) {
-                log("bearing exception {}", bearing.getLastAssemblyException().toString());
+                log("bearing exception {}", bearing.getLastAssemblyException().component.getString());
+            }
+            log("bearing immediate {}", bearing.getMovedContraption());
+            if (bearing.getMovedContraption() == null) {
+                try {
+                    BearingContraption built = new BearingContraption(false, Direction.UP);
+                    boolean ok = built.assemble(level, base);
+                    log("bearing manual ok {} blocks {}", ok, built.getBlocks().size());
+                    if (ok && !built.getBlocks().isEmpty()) {
+                        built.removeBlocksFromWorld(level, BlockPos.ZERO);
+                        ControlledContraptionEntity entity = ControlledContraptionEntity.create(level, bearing, built);
+                        entity.setPos(front.getX(), front.getY(), front.getZ());
+                        entity.setRotationAxis(Direction.Axis.Y);
+                        level.addFreshEntity(entity);
+                        bearing.attach(entity);
+                    }
+                } catch (AssemblyException ex) {
+                    log("bearing manual {}", ex.component.getString());
+                }
             }
             return bearing;
         }
@@ -464,6 +496,9 @@ public final class LiveTrial {
 
     private static String causeText(ReflectiveOperationException ex) {
         Throwable cause = ex instanceof InvocationTargetException target && target.getCause() != null ? target.getCause() : ex;
+        if (cause instanceof AssemblyException assembly && assembly.component != null) {
+            return assembly.component.getString();
+        }
         return cause.toString();
     }
 

@@ -4,7 +4,7 @@ import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.6.0-rc.3";
+    public static final String VERSION = "0.6.0-rc.4";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
