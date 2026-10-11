@@ -2,12 +2,11 @@ package com.vucelich.sablesafelanding;
 
 import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.ControlledContraptionEntity;
-import com.simibubi.create.api.contraption.BlockMovementChecks;
 import com.simibubi.create.content.contraptions.AssemblyException;
 import com.simibubi.create.content.contraptions.bearing.BearingBlock;
-import com.simibubi.create.content.contraptions.bearing.BearingContraption;
 import com.simibubi.create.content.contraptions.bearing.MechanicalBearingBlockEntity;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+import com.simibubi.create.content.kinetics.motor.CreativeMotorBlockEntity;
 import com.simibubi.create.content.contraptions.piston.LinearActuatorBlockEntity;
 import dev.ryanhcode.sable.SableConfig;
 import dev.ryanhcode.sable.api.SubLevelAssemblyHelper;
@@ -29,6 +28,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.level.block.state.properties.DirectionProperty;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -87,6 +87,7 @@ public final class LiveTrial {
     private static double startZ;
     private static double startAnchorY;
     private static boolean seated;
+    private static int activatedAt = -1;
 
     private LiveTrial() {
     }
@@ -188,15 +189,26 @@ public final class LiveTrial {
             controller = null;
             seated = false;
             ship = null;
+            activatedAt = -1;
             assembleScene(level, scene, origin);
-        } else if (phaseTick == 8) {
-            contraption = attached(controller);
-            log("{} contraption present={} claimed={} anchor={}",
+        } else if (activatedAt < 0 && phaseTick >= 8) {
+            float speed = controller instanceof KineticBlockEntity kinetic ? kinetic.getSpeed() : 0.0f;
+            if (speed != 0.0f || phaseTick >= 40) {
+                log("{} speed before assemble {}", scene.name, speed);
+                activate(scene);
+                activatedAt = phaseTick;
+            }
+        } else if (activatedAt >= 0 && phaseTick == activatedAt + 4) {
+            if (contraption == null || !contraption.isAlive()) {
+                contraption = attached(controller);
+            }
+            log("{} contraption present={} alive={} claimed={} anchor={}",
                     scene.name,
                     contraption != null,
+                    contraption != null && contraption.isAlive(),
                     contraption != null && ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()),
                     contraption == null ? "none" : contraption.getAnchorVec());
-            if (contraption != null) {
+            if (contraption != null && contraption.isAlive()) {
                 ship = assembleCar(level, carPos(scene.kind, origin), sceneIndex == 0);
                 seat(level, scene);
                 startMinY = ship == null ? Double.NaN : ship.boundingBox().minY();
@@ -205,9 +217,10 @@ public final class LiveTrial {
                 startAnchorY = contraption.getAnchorVec().y;
                 log("{} seated {}", scene.name, describe(ship));
             }
-        } else if (phaseTick > 8 && phaseTick <= 8 + MOVE_TICKS && contraption != null) {
-            nudge(scene, phaseTick - 8);
-        } else if (phaseTick == 9 + MOVE_TICKS) {
+        } else if (activatedAt >= 0 && phaseTick > activatedAt + 4 && phaseTick <= activatedAt + 4 + MOVE_TICKS
+                && contraption != null && contraption.isAlive()) {
+            nudge(scene, phaseTick - (activatedAt + 4));
+        } else if (activatedAt >= 0 && phaseTick == activatedAt + 5 + MOVE_TICKS) {
             report(scene);
             cleanup(level, origin);
             sceneIndex++;
@@ -229,9 +242,7 @@ public final class LiveTrial {
 
     private static BlockPos carPos(Kind kind, int origin) {
         int y = switch (kind) {
-            case ELEVATOR -> surface + 2;
-            case BEARING -> surface + 2;
-            case PISTON -> surface + 3;
+            case ELEVATOR, BEARING, PISTON -> surface + 2;
         };
         return new BlockPos(origin - 4, y, 8);
     }
@@ -240,10 +251,7 @@ public final class LiveTrial {
         if (ship == null || ship.isRemoved() || contraption == null) {
             return;
         }
-        double top = switch (scene.kind) {
-            case ELEVATOR, BEARING -> surface + 2.0;
-            case PISTON -> surface + 3.0;
-        };
+        double top = surface + 2.0;
         double gap = ship.boundingBox().minY() - top;
         if (Math.abs(gap) > 0.05 || Math.abs(ship.logicalPose().position().x() - contraption.getX()) > 1.5) {
             shiftShip(level, ship, contraption.getX() - ship.logicalPose().position().x(), top - ship.boundingBox().minY(), contraption.getZ() - ship.logicalPose().position().z());
@@ -300,28 +308,37 @@ public final class LiveTrial {
                 fmt(dY), fmt(dAnchor), fmt(dX), fmt(dZ), fmt(box.minY()), fmt(anchorY));
     }
 
-    private static BlockEntity elevator(ServerLevel level, BlockPos base) {
-        BlockPos pulleyPos = base.offset(0, 12, 0);
-        BlockPos contactPos = base.offset(0, 1, 0);
-        place(level, pulleyPos, "create:elevator_pulley", Direction.NORTH);
-        place(level, contactPos, "create:redstone_contact", Direction.UP);
-        for (BlockPos pos : List.of(contactPos.north(), contactPos.south(), contactPos.east(), contactPos.west())) {
-            level.setBlockAndUpdate(pos, Blocks.OAK_PLANKS.defaultBlockState());
-        }
-        road(level, base.offset(-6, 1, 0), base.offset(-2, 1, 0));
-        BlockEntity pulley = level.getBlockEntity(pulleyPos);
-        if (pulley instanceof KineticBlockEntity kinetic) {
-            kinetic.setSpeed(32.0f);
-        }
-        if (pulley != null) {
-            try {
-                invoke(pulley, "assemble");
-            } catch (ReflectiveOperationException ex) {
-                log("elevator assemble failed {}", causeText(ex));
+    private static void activate(Scene scene) {
+        if (controller instanceof MechanicalBearingBlockEntity bearing) {
+            bearing.assemble();
+            if (bearing.getLastAssemblyException() != null) {
+                log("{} exception {}", scene.name, bearing.getLastAssemblyException().component.getString());
             }
-            log("elevator state {} speed {}", level.getBlockState(pulleyPos), pulley instanceof KineticBlockEntity kinetic ? kinetic.getSpeed() : 0.0f);
+        } else if (controller != null) {
+            try {
+                invoke(controller, "assemble");
+            } catch (ReflectiveOperationException ex) {
+                log("{} assemble failed {}", scene.name, causeText(ex));
+            }
         }
-        return pulley;
+        contraption = attached(controller);
+        log("{} immediate alive {} entity {}", scene.name, contraption != null && contraption.isAlive(), contraption);
+    }
+
+    private static BlockEntity elevator(ServerLevel level, BlockPos base) {
+        BlockPos pulleyPos = base.offset(0, 8, 0);
+        BlockPos deck = base.offset(0, 1, 0);
+        place(level, pulleyPos, "create:elevator_pulley", Direction.NORTH);
+        for (int x = -1; x <= 1; x++) {
+            for (int z = -1; z <= 1; z++) {
+                level.setBlockAndUpdate(deck.offset(x, 0, z), Blocks.OAK_PLANKS.defaultBlockState());
+            }
+        }
+        place(level, deck.north(2), "create:redstone_contact", Direction.SOUTH);
+        road(level, base.offset(-6, 1, 0), base.offset(-2, 1, 0));
+        // Pulley shaft is the clockwise axis of its facing: north -> X.
+        motor(level, pulleyPos.west(), Direction.EAST);
+        return level.getBlockEntity(pulleyPos);
     }
 
     private static BlockEntity bearing(ServerLevel level, BlockPos base) {
@@ -332,68 +349,33 @@ public final class LiveTrial {
                 level.setBlockAndUpdate(deck.offset(x, 0, z), Blocks.OAK_PLANKS.defaultBlockState());
             }
         }
-        BlockPos front = base.above();
-        BlockState frontState = level.getBlockState(front);
-        log("bearing state {} front {} necessary {} allowed {} brittle {} emptyShape {}",
-                level.getBlockState(base),
-                frontState,
-                BlockMovementChecks.isMovementNecessary(frontState, level, front),
-                BlockMovementChecks.isMovementAllowed(frontState, level, front),
-                BlockMovementChecks.isBrittle(frontState),
-                frontState.getCollisionShape(level, front).isEmpty());
-        if (level.getBlockEntity(base) instanceof MechanicalBearingBlockEntity bearing) {
-            if (bearing instanceof KineticBlockEntity kinetic) {
-                kinetic.setSpeed(16.0f);
-            }
-            bearing.assemble();
-            if (bearing.getLastAssemblyException() != null) {
-                log("bearing exception {}", bearing.getLastAssemblyException().component.getString());
-            }
-            log("bearing immediate {}", bearing.getMovedContraption());
-            if (bearing.getMovedContraption() == null) {
-                try {
-                    BearingContraption built = new BearingContraption(false, Direction.UP);
-                    boolean ok = built.assemble(level, base);
-                    log("bearing manual ok {} blocks {}", ok, built.getBlocks().size());
-                    if (ok && !built.getBlocks().isEmpty()) {
-                        built.removeBlocksFromWorld(level, BlockPos.ZERO);
-                        ControlledContraptionEntity entity = ControlledContraptionEntity.create(level, bearing, built);
-                        entity.setPos(front.getX(), front.getY(), front.getZ());
-                        entity.setRotationAxis(Direction.Axis.Y);
-                        level.addFreshEntity(entity);
-                        bearing.attach(entity);
-                    }
-                } catch (AssemblyException ex) {
-                    log("bearing manual {}", ex.component.getString());
-                }
-            }
-            return bearing;
-        }
+        motor(level, base.below(), Direction.UP);
         return level.getBlockEntity(base);
     }
 
     private static BlockEntity piston(ServerLevel level, BlockPos base) {
         place(level, base, "create:sticky_mechanical_piston", Direction.UP);
-        place(level, base.above(), "create:piston_extension_pole", Direction.UP);
-        BlockPos deck = base.above(2);
+        // A retracted piston counts poles on its back, not in front of the head.
+        place(level, base.below(), "create:piston_extension_pole", Direction.UP);
+        BlockPos deck = base.above();
         for (int x = -1; x <= 1; x++) {
             for (int z = -1; z <= 1; z++) {
                 level.setBlockAndUpdate(deck.offset(x, 0, z), Blocks.OAK_PLANKS.defaultBlockState());
             }
         }
-        log("piston state {} pole {}", level.getBlockState(base), level.getBlockState(base.above()));
-        BlockEntity be = level.getBlockEntity(base);
-        if (be instanceof KineticBlockEntity kinetic) {
-            kinetic.setSpeed(32.0f);
+        // Facing up with axis_along_first false puts the shaft on Z.
+        motor(level, base.north(), Direction.SOUTH);
+        log("piston state {} pole {}", level.getBlockState(base), level.getBlockState(base.below()));
+        return level.getBlockEntity(base);
+    }
+
+    private static void motor(ServerLevel level, BlockPos pos, Direction facing) {
+        place(level, pos, "create:creative_motor", facing);
+        if (level.getBlockEntity(pos) instanceof CreativeMotorBlockEntity motor && motor.generatedSpeed != null) {
+            motor.generatedSpeed.setValue(32);
+            motor.updateGeneratedRotation();
+            log("motor at {} generates {}", pos, motor.getGeneratedSpeed());
         }
-        if (be != null) {
-            try {
-                invoke(be, "assemble");
-            } catch (ReflectiveOperationException ex) {
-                log("piston assemble failed {}", causeText(ex));
-            }
-        }
-        return be;
     }
 
     private static ServerSubLevel assembleCar(ServerLevel level, BlockPos origin, boolean tryAssembler) {
@@ -489,6 +471,9 @@ public final class LiveTrial {
         for (Property<?> property : state.getProperties()) {
             if (property instanceof DirectionProperty directions && property.getName().equals("facing") && directions.getPossibleValues().contains(facing)) {
                 state = state.setValue(directions, facing);
+            }
+            if (property instanceof BooleanProperty flag && property.getName().equals("axis_along_first")) {
+                state = state.setValue(flag, false);
             }
         }
         return state;
