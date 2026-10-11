@@ -60,12 +60,12 @@ public final class AntiClipStep {
         }
         List<BodyState> next = new ArrayList<>(bodies.size());
         for (BodyState body : bodies) {
-            next.add(stepOne(body, supports, world, config));
+            next.add(stepOne(body, supports, world, config, dt));
         }
         return List.copyOf(next);
     }
 
-    private BodyState stepOne(BodyState body, List<SupportMotion> supports, RescueBounds world, AntiClipConfig config) {
+    private BodyState stepOne(BodyState body, List<SupportMotion> supports, RescueBounds world, AntiClipConfig config, double dt) {
         boolean unsafe = !body.position().finite()
                 || !body.velocity().finite()
                 || !body.bounds().finite()
@@ -79,6 +79,9 @@ public final class AntiClipStep {
         }
         if (config.carry()) {
             body = carry(body, supports, config);
+        }
+        if (config.sweep() && body.solidContact()) {
+            body = sweep(body, supports, config, dt);
         }
         boolean penetrating = penetrating(body, supports, config);
         boolean supported = resting(body, supports, config);
@@ -179,6 +182,137 @@ public final class AntiClipStep {
             }
         }
         return false;
+    }
+
+    private record SweepHit(double time, Vec3 normal) {
+    }
+
+    private static BodyState sweep(BodyState body, List<SupportMotion> supports, AntiClipConfig config, double dt) {
+        BodyState separated = separate(body, supports, config);
+        Vec3 delta = separated.velocity().mul(dt);
+        if (delta.lengthSquared() < 1.0e-18) {
+            return separated;
+        }
+        double bestTime = 1.0;
+        Vec3 normal = null;
+        for (SupportMotion support : supports) {
+            Aabb solid = inset(support.volume(), config.maxPenetration());
+            if (solid == null) {
+                continue;
+            }
+            SweepHit hit = slab(separated.bounds(), delta, solid);
+            if (hit != null && hit.time < bestTime) {
+                bestTime = hit.time;
+                normal = hit.normal;
+            }
+        }
+        if (normal == null || bestTime >= 1.0) {
+            return separated;
+        }
+        Vec3 velocity = separated.velocity();
+        if (normal.y() > 0.5 && velocity.y() < 0.0) {
+            velocity = new Vec3(velocity.x(), 0.0, velocity.z());
+        } else if (normal.y() < -0.5 && velocity.y() > 0.0) {
+            velocity = new Vec3(velocity.x(), 0.0, velocity.z());
+        } else if (normal.x() > 0.5 && velocity.x() < 0.0 || normal.x() < -0.5 && velocity.x() > 0.0) {
+            velocity = new Vec3(0.0, velocity.y(), velocity.z());
+        } else if (normal.z() > 0.5 && velocity.z() < 0.0 || normal.z() < -0.5 && velocity.z() > 0.0) {
+            velocity = new Vec3(velocity.x(), velocity.y(), 0.0);
+        }
+        return separated.moved(delta.mul(Math.max(0.0, bestTime)), velocity);
+    }
+
+    private static BodyState separate(BodyState body, List<SupportMotion> supports, AntiClipConfig config) {
+        BodyState current = body;
+        for (SupportMotion support : supports) {
+            if (!support.volume().finite() || !current.bounds().intersects(support.volume())) {
+                continue;
+            }
+            Aabb solid = support.volume();
+            Aabb box = current.bounds();
+            double overlapX = Math.min(box.maxX(), solid.maxX()) - Math.max(box.minX(), solid.minX());
+            double overlapY = Math.min(box.maxY(), solid.maxY()) - Math.max(box.minY(), solid.minY());
+            double overlapZ = Math.min(box.maxZ(), solid.maxZ()) - Math.max(box.minZ(), solid.minZ());
+            double pushX = overlapX - config.maxPenetration();
+            double pushY = overlapY - config.maxPenetration();
+            double pushZ = overlapZ - config.maxPenetration();
+            if (pushX <= 0.0 && pushY <= 0.0 && pushZ <= 0.0) {
+                continue;
+            }
+            Vec3 delta;
+            Vec3 velocity = current.velocity();
+            if (pushY > 0.0 && pushY <= pushX && pushY <= pushZ || pushX <= 0.0 && pushZ <= 0.0) {
+                double sign = box.center().y() >= solid.center().y() ? 1.0 : -1.0;
+                delta = new Vec3(0.0, sign * pushY, 0.0);
+                if (sign > 0.0 && velocity.y() < 0.0 || sign < 0.0 && velocity.y() > 0.0) {
+                    velocity = new Vec3(velocity.x(), 0.0, velocity.z());
+                }
+            } else if (pushX > 0.0 && pushX <= pushZ) {
+                double sign = box.center().x() >= solid.center().x() ? 1.0 : -1.0;
+                delta = new Vec3(sign * pushX, 0.0, 0.0);
+                velocity = new Vec3(0.0, velocity.y(), velocity.z());
+            } else {
+                double sign = box.center().z() >= solid.center().z() ? 1.0 : -1.0;
+                delta = new Vec3(0.0, 0.0, sign * pushZ);
+                velocity = new Vec3(velocity.x(), velocity.y(), 0.0);
+            }
+            current = current.moved(delta, velocity);
+        }
+        return current;
+    }
+
+    private static Aabb inset(Aabb box, double amount) {
+        if (amount <= 0.0) {
+            return box;
+        }
+        double x = box.maxX() - box.minX();
+        double y = box.maxY() - box.minY();
+        double z = box.maxZ() - box.minZ();
+        double limit = Math.min(x, Math.min(y, z)) * 0.5;
+        if (limit <= 1.0e-9) {
+            return null;
+        }
+        double inset = Math.min(amount, limit - 1.0e-9);
+        return new Aabb(box.minX() + inset, box.minY() + inset, box.minZ() + inset,
+                box.maxX() - inset, box.maxY() - inset, box.maxZ() - inset);
+    }
+
+    private static SweepHit slab(Aabb body, Vec3 delta, Aabb solid) {
+        double sizeX = body.maxX() - body.minX();
+        double sizeY = body.maxY() - body.minY();
+        double sizeZ = body.maxZ() - body.minZ();
+        double[] start = {body.minX(), body.minY(), body.minZ()};
+        double[] move = {delta.x(), delta.y(), delta.z()};
+        double[] boxMin = {solid.minX() - sizeX, solid.minY() - sizeY, solid.minZ() - sizeZ};
+        double[] boxMax = {solid.maxX(), solid.maxY(), solid.maxZ()};
+        double enter = 0.0;
+        double exit = 1.0;
+        Vec3 normal = Vec3.ZERO;
+        for (int axis = 0; axis < 3; axis++) {
+            if (Math.abs(move[axis]) < 1.0e-12) {
+                if (start[axis] < boxMin[axis] || start[axis] > boxMax[axis]) {
+                    return null;
+                }
+                continue;
+            }
+            double t1 = (boxMin[axis] - start[axis]) / move[axis];
+            double t2 = (boxMax[axis] - start[axis]) / move[axis];
+            double near = Math.min(t1, t2);
+            double far = Math.max(t1, t2);
+            if (near > enter) {
+                enter = near;
+                double sign = move[axis] < 0.0 ? 1.0 : -1.0;
+                normal = axis == 0 ? new Vec3(sign, 0.0, 0.0) : axis == 1 ? new Vec3(0.0, sign, 0.0) : new Vec3(0.0, 0.0, sign);
+            }
+            exit = Math.min(exit, far);
+            if (enter > exit) {
+                return null;
+            }
+        }
+        if (enter < 0.0 || enter > 1.0) {
+            return null;
+        }
+        return new SweepHit(enter, normal);
     }
 
     static boolean penetrating(BodyState body, List<SupportMotion> supports, AntiClipConfig config) {

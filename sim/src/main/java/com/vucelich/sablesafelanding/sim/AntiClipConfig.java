@@ -35,7 +35,7 @@ public record AntiClipConfig(
                 true,
                 true,
                 false,
-                true,
+                false,
                 1.0,
                 8.0,
                 0.05,

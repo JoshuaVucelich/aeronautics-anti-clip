@@ -33,6 +33,10 @@ public record Aabb(double minX, double minY, double minZ, double maxX, double ma
                 && minZ < other.maxZ && maxZ > other.minZ;
     }
 
+    public boolean contains(double x, double y, double z) {
+        return x >= minX && x < maxX && y >= minY && y < maxY && z >= minZ && z < maxZ;
+    }
+
     public boolean finite() {
         return Double.isFinite(minX) && Double.isFinite(minY) && Double.isFinite(minZ)
                 && Double.isFinite(maxX) && Double.isFinite(maxY) && Double.isFinite(maxZ);

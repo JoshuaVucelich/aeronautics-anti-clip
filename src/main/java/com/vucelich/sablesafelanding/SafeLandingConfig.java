@@ -4,7 +4,7 @@ import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.4.0";
+    public static final String VERSION = "0.5.0";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -32,7 +32,7 @@ public final class SafeLandingConfig {
                 .comment("Parent a resting sub-level to a contraption. Off by default so a ship can lift off. Upward speed above half a block per second is never carried.")
                 .define("carry", defaults.carry());
         SWEEP = builder
-                .comment("Swept test that limits how far a fast sub-level may penetrate a contraption.")
+                .comment("Swept correction against contraption blocks. Off by default. When on, it moves a ship only if a real ship block overlaps a contraption block.")
                 .define("sweep", defaults.sweep());
         APPROACH_MARGIN = builder
                 .comment("Blocks before Sable's sub_level_remove_min/max at which a rescue starts. One block matches the deletion check.")

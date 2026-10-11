@@ -5,15 +5,11 @@ import com.simibubi.create.content.contraptions.Contraption;
 import com.simibubi.create.content.contraptions.ControlledContraptionEntity;
 import com.vucelich.sablesafelanding.sim.Aabb;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
-import com.vucelich.sablesafelanding.sim.AntiClipStep;
-import com.vucelich.sablesafelanding.sim.BodyState;
-import com.vucelich.sablesafelanding.sim.Rot;
 import com.vucelich.sablesafelanding.sim.SupportMotion;
 import com.vucelich.sablesafelanding.sim.Vec3;
 import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
-import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
 import dev.ryanhcode.sable.neoforge.event.ForgeSablePrePhysicsTickEvent;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
@@ -22,10 +18,6 @@ import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
-import org.joml.Quaterniond;
-import org.joml.Quaterniondc;
-import org.joml.Vector3d;
-import org.joml.Vector3dc;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -48,7 +40,7 @@ public final class CarryRuntime {
         }
         try {
             AntiClipConfig config = SafeLandingConfig.snapshot();
-            if (!config.carry()) {
+            if (!config.carry() && !config.sweep()) {
                 return;
             }
             float partial = (float) system.getPartialPhysicsTick();
@@ -70,59 +62,11 @@ public final class CarryRuntime {
                 if (subLevel.isRemoved()) {
                     continue;
                 }
-                carryOne(subLevel, pipeline, supports, config, event.getTimeStep());
+                VoidRescueRuntime.advance(subLevel, pipeline, supports, event.getTimeStep());
             }
         } catch (RuntimeException ex) {
             logFailure(ex);
         }
-    }
-
-    private static void carryOne(
-            ServerSubLevel subLevel,
-            PhysicsPipeline pipeline,
-            List<SupportMotion> supports,
-            AntiClipConfig config,
-            double dt
-    ) {
-        BoundingBox3dc box = subLevel.boundingBox();
-        Aabb bounds = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
-        Vector3dc position = subLevel.logicalPose().position();
-        Quaterniondc orientation = subLevel.logicalPose().orientation();
-        Vector3d velocity = subLevel.latestLinearVelocity;
-        BodyState before = new BodyState(
-                subLevel.getUniqueId().toString(),
-                new Vec3(position.x(), position.y(), position.z()),
-                new Vec3(velocity.x, velocity.y, velocity.z),
-                bounds,
-                new Rot(orientation.x(), orientation.y(), orientation.z(), orientation.w()),
-                false
-        );
-        BodyState after = AntiClipStep.carry(before, supports, config);
-        if (after.position().sub(before.position()).lengthSquared() < 1.0e-12
-                && after.orientation().equals(before.orientation())) {
-            return;
-        }
-        Vector3d next = new Vector3d(after.position().x(), after.position().y(), after.position().z());
-        Rot rot = after.orientation();
-        Quaterniond nextRot = new Quaterniond(rot.x(), rot.y(), rot.z(), rot.w());
-        Vec3 delta = after.position().sub(before.position());
-        Vector3d platformVelocity = new Vector3d(delta.x() / dt, delta.y() / dt, delta.z() / dt);
-        try {
-            if (pipeline != null) {
-                pipeline.teleport(subLevel, next, nextRot);
-                pipeline.resetVelocity(subLevel);
-                pipeline.addLinearAndAngularVelocity(subLevel, platformVelocity, new Vector3d());
-            } else {
-                subLevel.logicalPose().position().set(next);
-                subLevel.logicalPose().orientation().set(nextRot);
-            }
-        } catch (RuntimeException ex) {
-            subLevel.logicalPose().position().set(next);
-            subLevel.logicalPose().orientation().set(nextRot);
-            logFailure(ex);
-        }
-        subLevel.latestLinearVelocity.set(platformVelocity);
-        subLevel.updateBoundingBox();
     }
 
     private static List<SupportMotion> blocks(AbstractContraptionEntity entity, float previous, float partial) {

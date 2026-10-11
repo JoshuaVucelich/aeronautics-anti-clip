@@ -6,6 +6,7 @@ import com.vucelich.sablesafelanding.sim.AntiClipStep;
 import com.vucelich.sablesafelanding.sim.BodyState;
 import com.vucelich.sablesafelanding.sim.RescueBounds;
 import com.vucelich.sablesafelanding.sim.Rot;
+import com.vucelich.sablesafelanding.sim.SupportMotion;
 import com.vucelich.sablesafelanding.sim.Vec3;
 import dev.ryanhcode.sable.SableConfig;
 import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
@@ -110,10 +111,76 @@ public final class VoidRescueRuntime {
             if (!after.rescued()) {
                 return false;
             }
-            apply(subLevel, pipeline, after);
+            apply(subLevel, pipeline, after, true);
             subLevel.updateBoundingBox();
             logRescue(subLevel.getUniqueId());
             return true;
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+            return false;
+        }
+    }
+
+    /**
+     * Rescue, carry, and sweep for one sub-level. Pose is written when the step moved it
+     * or took away the velocity that would have tunneled.
+     */
+    public static void advance(ServerSubLevel subLevel, PhysicsPipeline pipeline, java.util.List<SupportMotion> supports, double dt) {
+        try {
+            if (subLevel.isRemoved()) {
+                return;
+            }
+            AntiClipConfig config = SafeLandingConfig.snapshot();
+            String dimension = subLevel.getLevel().dimension().location().toString();
+            STEP.bind(dimension, subLevel.getLevel().getGameTime());
+            BoundingBox3dc box = subLevel.boundingBox();
+            Aabb bounds = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+            RescueBounds world = RescueBounds.of(
+                    subLevel.getLevel().getMinBuildHeight(),
+                    SableConfig.SUB_LEVEL_REMOVE_MIN.getAsDouble(),
+                    SableConfig.SUB_LEVEL_REMOVE_MAX.getAsDouble(),
+                    config
+            );
+            BodyState before = snapshot(subLevel, bounds).withSolidContact(solidContact(subLevel, supports, config));
+            BodyState after = STEP.step(java.util.List.of(before), supports, world, config, dt).get(0);
+            boolean moved = after.position().sub(before.position()).lengthSquared() > 1.0e-12
+                    || !after.orientation().equals(before.orientation());
+            boolean slowed = after.velocity().sub(before.velocity()).lengthSquared() > 1.0e-12;
+            if (!after.rescued() && !moved && !slowed) {
+                return;
+            }
+            apply(subLevel, pipeline, after, after.rescued());
+            if (!after.rescued()) {
+                Vector3d desired = new Vector3d(after.velocity().x(), after.velocity().y(), after.velocity().z());
+                if (pipeline != null) {
+                    try {
+                        Vector3d current = pipeline.getLinearVelocity(subLevel, new Vector3d());
+                        pipeline.addLinearAndAngularVelocity(
+                                subLevel,
+                                new Vector3d(desired.x - current.x, desired.y - current.y, desired.z - current.z),
+                                new Vector3d()
+                        );
+                    } catch (RuntimeException ex) {
+                        logFailure(ex);
+                    }
+                }
+                subLevel.latestLinearVelocity.set(desired);
+            }
+            subLevel.updateBoundingBox();
+            if (after.rescued()) {
+                logRescue(subLevel.getUniqueId());
+            }
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+        }
+    }
+
+    private static boolean solidContact(ServerSubLevel subLevel, List<SupportMotion> supports, AntiClipConfig config) {
+        if (!config.sweep() || supports.isEmpty()) {
+            return false;
+        }
+        try {
+            return BlockContact.overlaps(subLevel, supports);
         } catch (RuntimeException ex) {
             logFailure(ex);
             return false;
@@ -134,14 +201,16 @@ public final class VoidRescueRuntime {
         );
     }
 
-    private static void apply(ServerSubLevel subLevel, PhysicsPipeline pipeline, BodyState restored) {
+    private static void apply(ServerSubLevel subLevel, PhysicsPipeline pipeline, BodyState restored, boolean zeroVelocity) {
         Vector3d position = new Vector3d(restored.position().x(), restored.position().y(), restored.position().z());
         Rot rot = restored.orientation();
         Quaterniond orientation = new Quaterniond(rot.x(), rot.y(), rot.z(), rot.w());
         if (pipeline != null) {
             try {
                 pipeline.teleport(subLevel, position, orientation);
-                pipeline.resetVelocity(subLevel);
+                if (zeroVelocity) {
+                    pipeline.resetVelocity(subLevel);
+                }
             } catch (RuntimeException ex) {
                 subLevel.logicalPose().position().set(position);
                 subLevel.logicalPose().orientation().set(orientation);
@@ -150,8 +219,10 @@ public final class VoidRescueRuntime {
             subLevel.logicalPose().position().set(position);
             subLevel.logicalPose().orientation().set(orientation);
         }
-        subLevel.latestLinearVelocity.zero();
-        subLevel.latestAngularVelocity.zero();
+        if (zeroVelocity) {
+            subLevel.latestLinearVelocity.zero();
+            subLevel.latestAngularVelocity.zero();
+        }
     }
 
     private static void logRescue(UUID id) {
