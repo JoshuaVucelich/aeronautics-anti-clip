@@ -114,6 +114,65 @@ class VoidRescueTest {
     }
 
     @Test
+    void bedrockDwellRestoresTheLastSafePoseWithoutADistanceGate() {
+        AntiClipConfig config = AntiClipConfig.defaults().withBedrockTicks(5);
+        RescueBounds world = RescueBounds.of(-64.0, -10_000.0, 100_000.0, config);
+        AntiClipStep step = new AntiClipStep();
+        step.bind(OVERWORLD, 1);
+        step.step(List.of(car("car", 4.0, 70.0, Vec3.ZERO)), List.of(), world, config, DT);
+        assertEquals(1, step.tracker().size());
+
+        BodyState deep = car("car", 4.0, -64.0 - 32.0 - 8.0, new Vec3(0.0, -20.0, 0.0));
+        assertFalse(world.needsRescue(deep.bounds()));
+        for (long time = 10; time < 15; time++) {
+            step.bind(OVERWORLD, time);
+            BodyState held = step.step(List.of(deep), List.of(), world, config, DT).get(0);
+            assertFalse(held.rescued());
+            assertEquals(deep.bounds().minY(), held.bounds().minY(), 1.0e-9);
+        }
+
+        step.bind(OVERWORLD, 15);
+        BodyState restored = step.step(List.of(deep), List.of(), world, config, DT).get(0);
+        assertTrue(restored.rescued());
+        assertEquals(70.0, restored.bounds().minY(), 1.0e-9);
+        assertEquals(4.0, restored.position().x(), 1.0e-9);
+        assertEquals(0.0, restored.velocity().y(), 1.0e-9);
+        assertEquals(0.0, restored.velocity().x(), 1.0e-9);
+    }
+
+    @Test
+    void aShipAboveTheBedrockLineIsNotRestoredAndAMissingPoseFailsOpen() {
+        AntiClipConfig config = AntiClipConfig.defaults().withBedrockTicks(1);
+        RescueBounds world = RescueBounds.of(-64.0, -10_000.0, 100_000.0, config);
+        BodyState above = car("car", 0.0, -80.0, Vec3.ZERO);
+        assertTrue(above.bounds().minY() > world.minBuildHeight() - config.bedrockMargin());
+
+        AntiClipStep step = new AntiClipStep();
+        step.bind(OVERWORLD, 1);
+        step.step(List.of(car("car", 0.0, 70.0, Vec3.ZERO)), List.of(), world, config, DT);
+        step.bind(OVERWORLD, 30);
+        BodyState stayed = step.step(List.of(above), List.of(), world, config, DT).get(0);
+        assertFalse(stayed.rescued());
+        assertEquals(-80.0, stayed.bounds().minY(), 1.0e-9);
+
+        BodyState lost = car("other", 2.0, -120.0, new Vec3(0.0, -10.0, 0.0));
+        step.bind(OVERWORLD, 40);
+        BodyState open = step.step(List.of(lost), List.of(), world, config, DT).get(0);
+        step.bind(OVERWORLD, 41);
+        open = step.step(List.of(lost), List.of(), world, config, DT).get(0);
+        assertFalse(open.rescued());
+        assertEquals(-120.0, open.bounds().minY(), 1.0e-9);
+
+        AntiClipConfig disabled = config.withBedrockRescue(false);
+        step.bind(OVERWORLD, 50);
+        BodyState ignored = step.step(List.of(deepEnough()), List.of(), world, disabled, DT).get(0);
+        step.bind(OVERWORLD, 60);
+        ignored = step.step(List.of(deepEnough()), List.of(), world, disabled, DT).get(0);
+        assertFalse(ignored.rescued());
+        assertEquals(-120.0, ignored.bounds().minY(), 1.0e-9);
+    }
+
+    @Test
     void bodyJustAboveBedrockIsNotRescued() {
         AntiClipConfig config = AntiClipConfig.defaults();
         RescueBounds world = RescueBounds.of(-64.0, -10_000.0, 100_000.0, config);
@@ -194,6 +253,10 @@ class VoidRescueTest {
         assertEquals(world.ceiling(), rescued.bounds().maxY(), 1.0e-6);
         assertEquals(2.0, rescued.position().x(), 1.0e-9);
         assertFalse(world.sableWouldRemove(rescued.bounds()));
+    }
+
+    private static BodyState deepEnough() {
+        return car("car", 4.0, -120.0, Vec3.ZERO);
     }
 
     private static BodyState car(String id, double x, double minY, Vec3 velocity) {

@@ -144,7 +144,7 @@ public final class VoidRescueRuntime {
             }
             apply(subLevel, pipeline, after, true);
             subLevel.updateBoundingBox();
-            logRescue(subLevel.getUniqueId());
+            logRescue(subLevel.getUniqueId(), before, after);
             return true;
         } catch (RuntimeException ex) {
             logFailure(ex);
@@ -204,7 +204,7 @@ public final class VoidRescueRuntime {
             if (live.isEmpty()) {
                 return;
             }
-            java.util.List<BodyState> after = STEP.step(before, supports, world, config, dt);
+            java.util.List<BodyState> after = STEP.step(before, supports, world, config, dt, false);
             for (int i = 0; i < live.size(); i++) {
                 finish(live.get(i), pipeline, before.get(i), after.get(i), saved, time);
             }
@@ -227,8 +227,9 @@ public final class VoidRescueRuntime {
         apply(subLevel, pipeline, after, after.rescued());
         if (!after.rescued()) {
             Vector3d desired = new Vector3d(after.velocity().x(), after.velocity().y(), after.velocity().z());
-            if (pipeline != null) {
+            if (pipeline != null && slowed) {
                 try {
+                    pipeline.wakeUp(subLevel);
                     Vector3d current = pipeline.getLinearVelocity(subLevel, new Vector3d());
                     pipeline.addLinearAndAngularVelocity(
                             subLevel,
@@ -240,10 +241,15 @@ public final class VoidRescueRuntime {
                 }
             }
             subLevel.latestLinearVelocity.set(desired);
+            if (slowed) {
+                PlatformTrace.note("ride:" + subLevel.getUniqueId(),
+                        String.format(java.util.Locale.ROOT, "vel=(%.2f,%.2f,%.2f) shipMinY=%.2f",
+                                desired.x, desired.y, desired.z, before.bounds().minY()));
+            }
         }
         subLevel.updateBoundingBox();
         if (after.rescued()) {
-            logRescue(subLevel.getUniqueId());
+            logRescue(subLevel.getUniqueId(), before, after);
         }
     }
 
@@ -297,11 +303,21 @@ public final class VoidRescueRuntime {
         }
     }
 
-    private static void logRescue(UUID id) {
+    private static void logRescue(UUID id, BodyState before, BodyState after) {
         if (!RESCUE_LOGS.tryAcquire(System.nanoTime())) {
             return;
         }
-        SableSafeLanding.LOGGER.info("Rescued sub-level {} from the void", id);
+        boolean bedrock = before.bounds().finite() && after.position().y() - before.position().y() > 1.0
+                && before.bounds().minY() > -1_000.0;
+        if (bedrock) {
+            SableSafeLanding.LOGGER.info(
+                    "Rescued sub-level {} from below bedrock to y {}",
+                    id,
+                    String.format(java.util.Locale.ROOT, "%.2f", after.bounds().minY())
+            );
+        } else {
+            SableSafeLanding.LOGGER.info("Rescued sub-level {} from the void", id);
+        }
     }
 
     private static void logFailure(RuntimeException ex) {

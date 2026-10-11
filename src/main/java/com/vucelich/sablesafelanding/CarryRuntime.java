@@ -4,8 +4,8 @@ import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.Contraption;
 import com.simibubi.create.content.contraptions.ControlledContraptionEntity;
 import com.vucelich.sablesafelanding.sim.Aabb;
-import com.vucelich.sablesafelanding.sim.AabbMerger;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
+import com.vucelich.sablesafelanding.sim.AntiClipStep;
 import com.vucelich.sablesafelanding.sim.RateLimiter;
 import com.vucelich.sablesafelanding.sim.SupportMotion;
 import com.vucelich.sablesafelanding.sim.Vec3;
@@ -27,15 +27,26 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Parents a sub-level that is resting on a world contraption to that contraption's substep motion.
- * The anchor is lerped the way Sable lerps it, so the carried pose matches the kinematic body.
+ * Builds per-block support volumes for the ride. The anchor delta is the motion since the previous
+ * game tick, kept for every substep of the current tick so the ship velocity stays at that rate.
+ * A delta past the ride cap is dropped here. A kinematic platform cannot pull, so the ride sets
+ * the ship's velocity instead of teleporting it by the angle.
  */
 public final class CarryRuntime {
     private static final net.minecraft.world.phys.Vec3 ROTATION_OFFSET = new net.minecraft.world.phys.Vec3(0.5, 0.5, 0.5);
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static final Map<String, Sample> SAMPLES = new HashMap<>();
 
-    private record Sample(double x, double y, double z, float angle) {
+    private record Sample(
+            long time,
+            double x,
+            double y,
+            double z,
+            float angle,
+            Vec3 translation,
+            double angleRadians,
+            Vec3 axis
+    ) {
     }
 
     private CarryRuntime() {
@@ -52,7 +63,7 @@ public final class CarryRuntime {
         }
         try {
             AntiClipConfig config = SafeLandingConfig.snapshot();
-            if (!config.carry() && !config.sweep()) {
+            if (!config.carry() && !config.sweep() && !config.feedColliders()) {
                 return;
             }
             List<SupportMotion> supports = new ArrayList<>();
@@ -64,7 +75,7 @@ public final class CarryRuntime {
                 if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
                     break;
                 }
-                supports.addAll(blocks(level.dimension().location().toString(), entity));
+                supports.addAll(blocks(level.dimension().location().toString(), entity, level.getGameTime()));
             }
             if (supports.isEmpty()) {
                 return;
@@ -96,39 +107,57 @@ public final class CarryRuntime {
 
     /**
      * Block-entity ticks move the contraption and then the entity copies that pose into its
-     * previous position before the next pre-physics event. Sampling here is what still sees
-     * the motion. The first sample stores the pose and applies no delta.
+     * previous position before the next pre-physics event. The delta between two pre-physics
+     * samples is that motion. The first sample stores the pose and applies no delta. Later
+     * substeps of the same tick reuse the delta so the velocity is not cleared after one substep.
      */
-    private static List<SupportMotion> blocks(String dimension, AbstractContraptionEntity entity) {
+    private static List<SupportMotion> blocks(String dimension, AbstractContraptionEntity entity, long gameTime) {
         Contraption contraption = entity.getContraption();
         if (contraption == null || contraption.getBlocks().isEmpty()) {
             return List.of();
         }
-        net.minecraft.world.phys.Vec3 anchor1 = entity.getAnchorVec();
-        float angle1 = entity instanceof ControlledContraptionEntity controlled ? controlled.getAngle(1.0f) : 0.0f;
+        net.minecraft.world.phys.Vec3 anchor = entity.getAnchorVec();
+        float angleNow = entity instanceof ControlledContraptionEntity controlled ? controlled.getAngle(1.0f) : 0.0f;
         String id = entity.getUUID().toString();
         String key = dimension + "\0" + id;
-        Sample last = SAMPLES.put(key, new Sample(anchor1.x, anchor1.y, anchor1.z, angle1));
-        net.minecraft.world.phys.Vec3 anchor0 = last == null
-                ? anchor1
-                : new net.minecraft.world.phys.Vec3(last.x, last.y, last.z);
-        net.minecraft.world.phys.Vec3 shift = anchor1.subtract(anchor0);
-        Vec3 translation = new Vec3(shift.x, shift.y, shift.z);
-        Vec3 pivot = new Vec3(anchor0.x + 0.5, anchor0.y + 0.5, anchor0.z + 0.5);
-        Vec3 axis = new Vec3(0.0, 1.0, 0.0);
-        double angle = 0.0;
-        if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null && last != null) {
-            axis = axis(controlled.getRotationAxis());
-            angle = Math.toRadians(Mth.wrapDegrees(angle1 - last.angle));
+        Sample previous = SAMPLES.get(key);
+        Sample sample;
+        if (previous != null && previous.time == gameTime) {
+            sample = previous;
+        } else {
+            Vec3 translation = Vec3.ZERO;
+            double radians = 0.0;
+            Vec3 axis = new Vec3(0.0, 1.0, 0.0);
+            if (previous != null) {
+                Vec3 raw = new Vec3(anchor.x - previous.x, anchor.y - previous.y, anchor.z - previous.z);
+                if (raw.length() <= AntiClipStep.MAX_RIDE_STEP) {
+                    translation = raw;
+                }
+                if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
+                    axis = axis(controlled.getRotationAxis());
+                    float degrees = Mth.wrapDegrees(angleNow - previous.angle);
+                    if (Math.abs(degrees) <= AntiClipStep.MAX_RIDE_DEGREES) {
+                        radians = Math.toRadians(degrees);
+                    }
+                }
+                if (raw.length() > 1.0e-4 || Math.abs(Mth.wrapDegrees(angleNow - previous.angle)) > 0.05f) {
+                    PlatformTrace.note(id, String.format(java.util.Locale.ROOT,
+                            "shift=(%.3f,%.3f,%.3f) applied=(%.3f,%.3f,%.3f) angleDeg=%.2f",
+                            raw.x(), raw.y(), raw.z(),
+                            translation.x(), translation.y(), translation.z(),
+                            Mth.wrapDegrees(angleNow - previous.angle)));
+                }
+            }
+            sample = new Sample(gameTime, anchor.x, anchor.y, anchor.z, angleNow, translation, radians, axis);
+            SAMPLES.put(key, sample);
         }
-        List<Aabb> boxes = new ArrayList<>();
+        Vec3 pivot = new Vec3(sample.x + 0.5, sample.y + 0.5, sample.z + 0.5);
+        net.minecraft.world.phys.Vec3 anchorNow = new net.minecraft.world.phys.Vec3(sample.x, sample.y, sample.z);
+        List<SupportMotion> supports = new ArrayList<>();
         for (BlockPos pos : contraption.getBlocks().keySet()) {
             Aabb local = new Aabb(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0);
-            boxes.add(Aabb.enclosing(corners(entity, local, anchor0, 0.0f)));
-        }
-        List<SupportMotion> supports = new ArrayList<>();
-        for (Aabb world : AabbMerger.merge(boxes)) {
-            supports.add(new SupportMotion(id, world, translation, pivot, axis, angle));
+            Aabb world = Aabb.enclosing(corners(entity, local, anchorNow, 1.0f));
+            supports.add(new SupportMotion(id, world, sample.translation, pivot, sample.axis, sample.angleRadians));
         }
         return supports;
     }

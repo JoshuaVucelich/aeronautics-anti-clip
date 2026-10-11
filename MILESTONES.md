@@ -41,4 +41,6 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 
 - Spatial hash, merged support boxes, NaN rejection, per-feature kill switches, and a rate-limited failure path.
 - Repro: `HardeningTest`.
-- Version `0.6.0-rc.8` jar. Still not published to Modrinth or CurseForge.
+- A fed collider samples the contraption anchor once per tick so Rapier's kinematic velocity is the real platform motion. A resting car takes that velocity, including downward, because a kinematic body does not pull. Steps larger than 0.75 blocks or 25 degrees are ignored.
+- A separate bedrock rescue restores a sub-level that has stayed below min build height minus 32 blocks for 40 ticks to its last safe pose in the same dimension, with velocity zeroed. It does not use the 32-block distance gate, and it does not fire at the remove bounds.
+- Version `0.6.0-rc.9` jar. Still not published to Modrinth or CurseForge.

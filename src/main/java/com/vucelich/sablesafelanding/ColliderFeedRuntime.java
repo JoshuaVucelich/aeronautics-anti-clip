@@ -33,6 +33,7 @@ public final class ColliderFeedRuntime {
     private static final Map<String, Map<String, FedContraptionCollider>> FED = new HashMap<>();
     private static final Set<String> HOOKED = new HashSet<>();
     private static final Set<String> CLAIMED = new HashSet<>();
+    private static final Set<String> KINEMATIC_LOGGED = new HashSet<>();
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static boolean deferredWarning;
 
@@ -88,6 +89,7 @@ public final class ColliderFeedRuntime {
         FED.clear();
         HOOKED.clear();
         CLAIMED.clear();
+        KINEMATIC_LOGGED.clear();
     }
 
     public static void forgetDimension(String dimension) {
@@ -168,6 +170,22 @@ public final class ColliderFeedRuntime {
         }
         for (FeedAction action : planner.plan(requests, config.feedColliders())) {
             apply(pipeline, planner, fed, entities, action);
+        }
+        long time = level.getGameTime();
+        for (Map.Entry<String, FedContraptionCollider> entry : fed.entrySet()) {
+            FedContraptionCollider collider = entry.getValue();
+            collider.noteSample(time);
+            org.joml.Vector3d delta = collider.anchorDelta(new org.joml.Vector3d());
+            if (delta.lengthSquared() > 1.0e-4 && KINEMATIC_LOGGED.add(entry.getKey())) {
+                SableSafeLanding.LOGGER.info(
+                        "LIVE kinematic {} dAnchor=({},{},{}) dAngle={}",
+                        entry.getKey(),
+                        String.format(java.util.Locale.ROOT, "%.3f", delta.x),
+                        String.format(java.util.Locale.ROOT, "%.3f", delta.y),
+                        String.format(java.util.Locale.ROOT, "%.3f", delta.z),
+                        String.format(java.util.Locale.ROOT, "%.2f", collider.angleDeltaDegrees())
+                );
+            }
         }
     }
 

@@ -4,7 +4,7 @@ import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.6.0-rc.8";
+    public static final String VERSION = "0.6.0-rc.9";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -16,6 +16,9 @@ public final class SafeLandingConfig {
     public static final ModConfigSpec.DoubleValue MAX_PENETRATION;
     public static final ModConfigSpec.DoubleValue REST_EPSILON;
     public static final ModConfigSpec.DoubleValue STABLE_FALL_SPEED;
+    public static final ModConfigSpec.BooleanValue BEDROCK_RESCUE;
+    public static final ModConfigSpec.DoubleValue BEDROCK_MARGIN;
+    public static final ModConfigSpec.IntValue BEDROCK_TICKS;
 
     static {
         AntiClipConfig defaults = AntiClipConfig.defaults();
@@ -29,7 +32,7 @@ public final class SafeLandingConfig {
                 .comment("Feed moving elevator, bearing, piston, and gantry colliders into Sable/Rapier.")
                 .define("feedColliders", defaults.feedColliders());
         CARRY = builder
-                .comment("Parent a resting sub-level to a contraption. Off by default so a ship can lift off. Upward speed above half a block per second is never carried.")
+                .comment("Match a resting sub-level to a contraption's per-tick velocity, including a small bearing rotation. Off unless feed is also off: feed uses the same coupling. A step larger than 0.75 blocks or 25 degrees is ignored.")
                 .define("carry", defaults.carry());
         SWEEP = builder
                 .comment("Swept correction against contraption blocks. Off by default. When on, it moves a ship only if a real ship block overlaps a contraption block.")
@@ -49,6 +52,15 @@ public final class SafeLandingConfig {
         STABLE_FALL_SPEED = builder
                 .comment("Downward speed, in blocks per second, above which a pose is not stored as safe.")
                 .defineInRange("stableFallSpeed", defaults.stableFallSpeed(), 0.0, 10_000.0);
+        BEDROCK_RESCUE = builder
+                .comment("After a sub-level stays below min build height minus bedrockMargin for bedrockTicks, put it back at its last safe pose in the same dimension and zero its velocity. This is separate from the sub_level_remove clamp. Sable does not delete a ship that is merely below bedrock.")
+                .define("bedrockRescue", defaults.bedrockRescue());
+        BEDROCK_MARGIN = builder
+                .comment("Blocks below min build height the sub-level must reach before the bedrock dwell starts.")
+                .defineInRange("bedrockMargin", defaults.bedrockMargin(), 0.0, 10_000.0);
+        BEDROCK_TICKS = builder
+                .comment("Consecutive ticks the sub-level must stay below that line before it is restored.")
+                .defineInRange("bedrockTicks", defaults.bedrockTicks(), 1, 20_000);
 
         SPEC = builder.build();
     }
@@ -70,7 +82,10 @@ public final class SafeLandingConfig {
                 STABLE_FALL_SPEED.getAsDouble(),
                 defaults.gravity(),
                 defaults.spatialCell(),
-                defaults.maxPairChecks()
+                defaults.maxPairChecks(),
+                BEDROCK_RESCUE.getAsBoolean(),
+                BEDROCK_MARGIN.getAsDouble(),
+                BEDROCK_TICKS.getAsInt()
         );
     }
 }

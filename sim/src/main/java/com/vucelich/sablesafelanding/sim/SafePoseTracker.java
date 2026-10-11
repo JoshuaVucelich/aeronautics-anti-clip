@@ -35,6 +35,10 @@ public final class SafePoseTracker {
         if (penetrating || !world.comfortablyInside(body.bounds())) {
             return;
         }
+        // Below min build height is the bedrock loss. It must not overwrite the last surface pose.
+        if (body.bounds().minY() < world.minBuildHeight()) {
+            return;
+        }
         boolean stable = supported || body.velocity().y() > -config.stableFallSpeed();
         if (!stable) {
             return;
@@ -60,6 +64,21 @@ public final class SafePoseTracker {
             return false;
         }
         return body.position().sub(saved.position()).lengthSquared() <= MAX_DISTANCE * MAX_DISTANCE;
+    }
+
+    /**
+     * Bedrock rescue ignores horizontal distance. A car that fell from the surface through
+     * bedrock is much farther than {@link #MAX_DISTANCE} from the pose it left.
+     * The snapshot is already stored under the body's dimension.
+     */
+    public boolean usableRecent(PoseSnapshot saved, RescueBounds world, long time) {
+        if (saved == null || !saved.finite() || world.needsRescue(saved.bounds())) {
+            return false;
+        }
+        if (saved.bounds().minY() < world.minBuildHeight()) {
+            return false;
+        }
+        return saved.time() <= time && time - saved.time() <= MAX_AGE;
     }
 
     public void put(String dimension, String id, PoseSnapshot snapshot) {

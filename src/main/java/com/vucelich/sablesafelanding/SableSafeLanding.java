@@ -43,5 +43,6 @@ public final class SableSafeLanding {
         ColliderFeedRuntime.clear();
         VoidRescueRuntime.clear();
         CarryRuntime.clear();
+        PlatformTrace.clear();
     }
 }

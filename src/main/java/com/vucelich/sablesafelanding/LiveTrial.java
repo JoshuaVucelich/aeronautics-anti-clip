@@ -19,6 +19,8 @@ import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.level.block.FaceAttachedHorizontalDirectionalBlock;
+import net.minecraft.world.level.block.state.properties.AttachFace;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -47,30 +49,30 @@ import java.util.List;
  */
 public final class LiveTrial {
     private static final boolean ENABLED = Boolean.getBoolean("sable_safe_landing.live");
-    private static final int MOVE_TICKS = 16;
     private static final double MOVE_STEP = 0.25;
 
     private enum Kind {
         ELEVATOR, BEARING, PISTON
     }
 
-    private record Scene(String name, Kind kind, boolean feed, boolean carry) {
+    private record Scene(String name, Kind kind, boolean feed, boolean carry, int direction, int moveTicks) {
     }
 
     private static final Scene[] SCENES = {
-            new Scene("elevator-off", Kind.ELEVATOR, false, false),
-            new Scene("elevator-feed", Kind.ELEVATOR, true, false),
-            new Scene("elevator-carry", Kind.ELEVATOR, true, true),
-            new Scene("bearing-feed", Kind.BEARING, true, false),
-            new Scene("bearing-carry", Kind.BEARING, true, true),
-            new Scene("piston-feed", Kind.PISTON, true, false),
-            new Scene("piston-carry", Kind.PISTON, true, true)
+            new Scene("elevator-off", Kind.ELEVATOR, false, false, -1, 20),
+            new Scene("elevator-down", Kind.ELEVATOR, true, false, -1, 20),
+            new Scene("elevator-up", Kind.ELEVATOR, true, false, 1, 20),
+            new Scene("elevator-carry", Kind.ELEVATOR, true, true, -1, 20),
+            new Scene("bearing-feed", Kind.BEARING, true, false, 0, 24),
+            new Scene("bearing-carry", Kind.BEARING, true, true, 0, 24),
+            new Scene("piston-feed", Kind.PISTON, true, false, 1, 48)
     };
 
     private enum Phase {
         WARMUP,
         VOID_OFF,
         VOID_ON,
+        BEDROCK,
         SCENE,
         DONE
     }
@@ -112,6 +114,7 @@ public final class LiveTrial {
                 case WARMUP -> warmup(level);
                 case VOID_OFF -> voidCase(level, false);
                 case VOID_ON -> voidCase(level, true);
+                case BEDROCK -> bedrockCase(level);
                 case SCENE -> scene(level);
                 case DONE -> {
                 }
@@ -166,7 +169,7 @@ public final class LiveTrial {
         } else if (phaseTick == 40) {
             log("void-{} after remove removed={} {}", rescue ? "on" : "off", ship != null && ship.isRemoved(), describe(ship));
             discardShip();
-            phase = rescue ? Phase.SCENE : Phase.VOID_ON;
+            phase = rescue ? Phase.BEDROCK : Phase.VOID_ON;
             phaseTick = 0;
             sceneIndex = 0;
             return;
@@ -217,10 +220,10 @@ public final class LiveTrial {
                 startAnchorY = contraption.getAnchorVec().y;
                 log("{} seated {}", scene.name, describe(ship));
             }
-        } else if (activatedAt >= 0 && phaseTick > activatedAt + 4 && phaseTick <= activatedAt + 4 + MOVE_TICKS
+        } else if (activatedAt >= 0 && phaseTick > activatedAt + 4 && phaseTick <= activatedAt + 4 + scene.moveTicks()
                 && contraption != null && contraption.isAlive()) {
             nudge(scene, phaseTick - (activatedAt + 4));
-        } else if (activatedAt >= 0 && phaseTick == activatedAt + 5 + MOVE_TICKS) {
+        } else if (activatedAt >= 0 && phaseTick == activatedAt + 5 + scene.moveTicks()) {
             report(scene);
             cleanup(level, origin);
             sceneIndex++;
@@ -268,21 +271,24 @@ public final class LiveTrial {
     }
 
     private static void nudge(Scene scene, int step) {
-        if (contraption == null) {
+        if (contraption == null || scene.direction == 0) {
             return;
         }
-        if (scene.kind == Kind.BEARING && controller instanceof MechanicalBearingBlockEntity bearing && contraption instanceof ControlledContraptionEntity controlled) {
-            float angle = step * (90.0f / MOVE_TICKS);
-            bearing.setAngle(angle);
-            controlled.setAngle(angle);
+        if (scene.kind == Kind.BEARING) {
+            // The motor already integrates the angle. Overwriting it wraps the sample and flings the car.
             return;
         }
-        double dy = scene.kind == Kind.PISTON ? MOVE_STEP : -MOVE_STEP;
-        if (controller instanceof LinearActuatorBlockEntity actuator) {
-            actuator.offset += (float) Math.abs(MOVE_STEP);
-            actuator.running = true;
+        if (scene.kind == Kind.PISTON) {
+            // The actuator tick calls resetContraptionToOffset, which undoes a raw setPos.
+            return;
         }
+        // An elevator with no floor target has movement speed near zero. Move the entity itself
+        // and leave the actuator offset alone so the pulley does not write part of the step back.
+        double dy = scene.direction * MOVE_STEP;
         contraption.setPos(contraption.getX(), contraption.getY() + dy, contraption.getZ());
+        if (step == 1) {
+            log("{} nudge {} per tick for {} ticks", scene.name, dy, scene.moveTicks);
+        }
     }
 
     private static void report(Scene scene) {
@@ -314,9 +320,47 @@ public final class LiveTrial {
         } else {
             outcome = "separated";
         }
-        log("{} outcome={} seated={} removed={} dY={} dAnchor={} dX={} dZ={} minY={} anchorY={}",
+        String platform = contraption == null ? "none" : PlatformTrace.get(contraption.getUUID().toString());
+        String ride = PlatformTrace.get("ride:" + ship.getUniqueId());
+        org.joml.Vector3d velocity = ship.latestLinearVelocity;
+        log("{} outcome={} seated={} removed={} claimed={} dY={} dAnchor={} dX={} dZ={} minY={} anchorY={} velY={} platform=[{}] ride=[{}]",
                 scene.name, outcome, seated, ship.isRemoved(),
-                fmt(dY), fmt(dAnchor), fmt(dX), fmt(dZ), fmt(box.minY()), fmt(anchorY));
+                contraption != null && ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()),
+                fmt(dY), fmt(dAnchor), fmt(dX), fmt(dZ), fmt(box.minY()), fmt(anchorY), fmt(velocity.y),
+                platform, ride);
+    }
+
+    /**
+     * A ship held below min build height minus the configured margin is restored to the last
+     * safe pose. Sable does not delete this case.
+     */
+    private static void bedrockCase(ServerLevel level) {
+        flags(true, false, false);
+        SafeLandingConfig.BEDROCK_RESCUE.set(true);
+        int dwell = SafeLandingConfig.BEDROCK_TICKS.getAsInt();
+        double line = level.getMinBuildHeight() - SafeLandingConfig.BEDROCK_MARGIN.getAsDouble() - 8.0;
+        if (phaseTick == 0) {
+            discardShip();
+            ship = assembleCar(level, new BlockPos(24, surface + 2, 8), false);
+            log("bedrock assembled {}", describe(ship));
+        } else if (phaseTick == 8) {
+            push(level, ship, line);
+            log("bedrock pushed line={} {}", fmt(line), describe(ship));
+        } else if (phaseTick == 20) {
+            log("bedrock early {}", describe(ship));
+        } else if (phaseTick == 8 + dwell + 8) {
+            org.joml.Vector3d velocity = ship == null ? new org.joml.Vector3d() : ship.latestLinearVelocity;
+            log("bedrock after dwell removed={} vel=({},{},{}) {}",
+                    ship != null && ship.isRemoved(),
+                    fmt(velocity.x), fmt(velocity.y), fmt(velocity.z),
+                    describe(ship));
+            discardShip();
+            phase = Phase.SCENE;
+            phaseTick = 0;
+            sceneIndex = 0;
+            return;
+        }
+        phaseTick++;
     }
 
     private static void activate(Scene scene) {
@@ -413,30 +457,84 @@ public final class LiveTrial {
         }
         List<ServerSubLevel> before = ships(level);
         if (tryAssembler) {
-            BlockPos assemblerPos = origin.offset(0, 0, 1);
-            place(level, assemblerPos, "simulated:physics_assembler", Direction.NORTH);
-            BlockEntity assembler = level.getBlockEntity(assemblerPos);
-            if (assembler != null) {
-                try {
-                    invoke(assembler, "assembleOrDisassemble");
-                } catch (ReflectiveOperationException ex) {
-                    log("physics assembler call failed {}", ex.toString());
-                }
-            } else {
-                log("physics assembler block missing");
-            }
-            ServerSubLevel created = newest(before, ships(level));
+            ServerSubLevel created = tryPhysicsAssembler(level, blocks.get(1), before);
             if (created != null) {
-                log("physics assembler produced {}", created.getUniqueId());
                 return created;
             }
-            level.setBlockAndUpdate(assemblerPos, Blocks.AIR.defaultBlockState());
             log("physics assembler produced no sub-level; using Sable assembly");
         }
         BlockPos min = blocks.get(0);
         BlockPos max = blocks.get(blocks.size() - 1);
         BoundingBox3i bounds = new BoundingBox3i(min.getX(), min.getY(), min.getZ(), max.getX(), max.getY(), max.getZ());
         return SubLevelAssemblyHelper.assembleBlocks(level, origin, blocks, bounds);
+    }
+
+    private static ServerSubLevel tryPhysicsAssembler(ServerLevel level, BlockPos plank, List<ServerSubLevel> before) {
+        BlockPos assemblerPos = plank.north();
+        Block block = BuiltInRegistries.BLOCK.get(ResourceLocation.parse("simulated:physics_assembler"));
+        if (block == null || block == Blocks.AIR) {
+            log("physics assembler block is not registered");
+            return null;
+        }
+        BlockState state = block.defaultBlockState();
+        if (state.hasProperty(FaceAttachedHorizontalDirectionalBlock.FACE)) {
+            state = state.setValue(FaceAttachedHorizontalDirectionalBlock.FACE, AttachFace.WALL);
+        }
+        if (state.hasProperty(FaceAttachedHorizontalDirectionalBlock.FACING)) {
+            state = state.setValue(FaceAttachedHorizontalDirectionalBlock.FACING, Direction.NORTH);
+        }
+        level.setBlockAndUpdate(assemblerPos, state);
+        BlockEntity assembler = level.getBlockEntity(assemblerPos);
+        if (assembler == null) {
+            log("physics assembler block entity missing, state {}", level.getBlockState(assemblerPos));
+            return null;
+        }
+        try {
+            invoke(assembler, "assembleOrDisassemble");
+        } catch (ReflectiveOperationException ex) {
+            log("physics assembler call failed {}", causeText(ex));
+        }
+        Object failure = readAssemblyException(assembler);
+        if (failure != null) {
+            log("physics assembler lastException {}", failure instanceof AssemblyException assembly && assembly.component != null
+                    ? assembly.component.getString() : failure);
+        }
+        ServerSubLevel created = newest(before, ships(level));
+        if (created != null) {
+            log("physics assembler produced {}", created.getUniqueId());
+            return created;
+        }
+        try {
+            Class<?> helper = Class.forName("dev.simulated_team.simulated.util.SimAssemblyHelper");
+            Method assemble = helper.getMethod(
+                    "assembleFromSingleBlock",
+                    net.minecraft.world.level.Level.class,
+                    BlockPos.class,
+                    BlockPos.class,
+                    boolean.class,
+                    boolean.class
+            );
+            Object result = assemble.invoke(null, level, assemblerPos, plank, Boolean.TRUE, Boolean.TRUE);
+            log("physics assembler direct result {}", result);
+        } catch (ReflectiveOperationException ex) {
+            log("physics assembler direct call failed {}", causeText(ex));
+        }
+        created = newest(before, ships(level));
+        if (created != null) {
+            log("physics assembler direct produced {}", created.getUniqueId());
+            return created;
+        }
+        level.setBlockAndUpdate(assemblerPos, Blocks.AIR.defaultBlockState());
+        return null;
+    }
+
+    private static Object readAssemblyException(BlockEntity assembler) {
+        try {
+            Method method = assembler.getClass().getMethod("getLastAssemblyException");
+            return method.invoke(assembler);
+        } catch (ReflectiveOperationException ex) {
+            return null;
+        }
     }
 
     private static void push(ServerLevel level, ServerSubLevel subLevel, double targetMinY) {

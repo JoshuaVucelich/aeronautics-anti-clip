@@ -14,6 +14,9 @@ class HarnessBaselineTest {
         assertTrue(config.feedColliders());
         assertFalse(config.carry());
         assertFalse(config.sweep());
+        assertTrue(config.bedrockRescue());
+        assertEquals(32.0, config.bedrockMargin());
+        assertEquals(40, config.bedrockTicks());
         assertEquals(1.0, config.approachMargin());
         assertEquals(0.05, config.maxPenetration());
         assertEquals(-32.0, config.gravity());

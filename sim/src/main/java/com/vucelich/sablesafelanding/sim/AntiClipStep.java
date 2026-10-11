@@ -12,6 +12,8 @@ import java.util.Set;
 public final class AntiClipStep {
     private final SafePoseTracker tracker = new SafePoseTracker();
     private final Map<String, Set<String>> idsByDimension = new HashMap<>();
+    /** Game time when a body first sat below the bedrock line, keyed by dimension and id. */
+    private final Map<String, Long> bedrockSince = new HashMap<>();
     private String dimension = "sim";
     private long time;
 
@@ -21,12 +23,15 @@ public final class AntiClipStep {
 
     public void clear() {
         idsByDimension.clear();
+        bedrockSince.clear();
         tracker.retain(Set.of());
     }
 
     public void forgetDimension(String dimension) {
         idsByDimension.remove(dimension);
         tracker.forgetDimension(dimension);
+        String prefix = dimension + "\u0000";
+        bedrockSince.keySet().removeIf(key -> key.startsWith(prefix));
     }
 
     /**
@@ -60,6 +65,21 @@ public final class AntiClipStep {
             AntiClipConfig config,
             double dt
     ) {
+        return step(bodies, supports, world, config, dt, true);
+    }
+
+    /**
+     * @param integrateRide when false, a ride only writes the platform velocity. The physics
+     *                      step integrates it. Integrating here as well would move the ship twice.
+     */
+    public List<BodyState> step(
+            List<BodyState> bodies,
+            List<SupportMotion> supports,
+            RescueBounds world,
+            AntiClipConfig config,
+            double dt,
+            boolean integrateRide
+    ) {
         if (dt < 0.0) {
             throw new IllegalArgumentException("dt must be non-negative");
         }
@@ -67,7 +87,7 @@ public final class AntiClipStep {
         List<BodyState> next = new ArrayList<>(bodies.size());
         for (BodyState body : bodies) {
             List<SupportMotion> local = index.nearby(queryBounds(body, config, dt), config.maxPairChecks());
-            next.add(stepOne(body, local, world, config, dt));
+            next.add(stepOne(body, local, world, config, dt, integrateRide));
         }
         return List.copyOf(next);
     }
@@ -88,10 +108,10 @@ public final class AntiClipStep {
                     Math.max(bounds.maxZ(), end.maxZ())
             );
         }
-        return bounds.expand(config.restEpsilon());
+        return bounds.expand(Math.max(config.restEpsilon(), RIDE_WINDOW));
     }
 
-    private BodyState stepOne(BodyState body, List<SupportMotion> supports, RescueBounds world, AntiClipConfig config, double dt) {
+    private BodyState stepOne(BodyState body, List<SupportMotion> supports, RescueBounds world, AntiClipConfig config, double dt, boolean integrateRide) {
         boolean unsafe = !body.position().finite()
                 || !body.velocity().finite()
                 || !body.bounds().finite()
@@ -103,8 +123,12 @@ public final class AntiClipStep {
             }
             return rescue(body, world);
         }
-        if (config.carry()) {
-            body = carry(body, supports, config);
+        BodyState bedrock = bedrock(body, world, config);
+        if (bedrock != null) {
+            return bedrock;
+        }
+        if (config.carry() || config.feedColliders()) {
+            body = ride(body, supports, config, integrateRide);
         }
         if (config.sweep() && body.solidContact()) {
             body = sweep(body, supports, config, dt);
@@ -146,37 +170,93 @@ public final class AntiClipStep {
         );
     }
 
+    /**
+     * A sub-level that has stayed below {@code minBuildHeight - bedrockMargin} for
+     * {@code bedrockTicks} game ticks is put back at the last safe pose in this dimension.
+     * Distance is not a gate: the fall itself is what made the pose far. No saved pose means
+     * the body is left where it is.
+     *
+     * @return the restored body, or null when this path does not apply
+     */
+    private BodyState bedrock(BodyState body, RescueBounds world, AntiClipConfig config) {
+        String key = dimension + "\u0000" + body.id();
+        double line = world.minBuildHeight() - config.bedrockMargin();
+        if (!config.bedrockRescue() || !body.bounds().finite() || body.bounds().minY() >= line) {
+            bedrockSince.remove(key);
+            return null;
+        }
+        bedrockSince.putIfAbsent(key, time);
+        long elapsed = time - bedrockSince.get(key);
+        if (elapsed < config.bedrockTicks()) {
+            return null;
+        }
+        PoseSnapshot saved = tracker.get(dimension, body.id());
+        if (!tracker.usableRecent(saved, world, time)) {
+            return null;
+        }
+        bedrockSince.remove(key);
+        return new BodyState(body.id(), saved.position(), Vec3.ZERO, saved.bounds(), saved.orientation(), true);
+    }
+
     /** Upward speed, in blocks per second, that means the ship is leaving the platform. */
     static final double TAKEOFF_SPEED = 0.5;
+    /** Blocks of platform motion in one tick. Anything larger is a bad sample and is ignored. */
+    public static final double MAX_RIDE_STEP = 0.75;
+    /** Degrees of platform rotation in one tick. A larger turn is not applied. */
+    public static final double MAX_RIDE_DEGREES = 25.0;
+    /** How far above a block top a ship may be and still count as on that block. */
+    static final double RIDE_WINDOW = 1.0;
 
-    public static BodyState carry(BodyState body, List<SupportMotion> supports, AntiClipConfig config) {
-        if (body.velocity().finite() && body.velocity().y() > TAKEOFF_SPEED) {
-            return body;
-        }
+    /**
+     * Match a resting ship to the platform's per-tick motion. Translation and the tangential
+     * step of a small rotation become a velocity of {@code step * 20}. A step past
+     * {@link #MAX_RIDE_STEP} is refused so a bad angle cannot fling the ship.
+     */
+    public static BodyState ride(BodyState body, List<SupportMotion> supports, AntiClipConfig config, boolean integrate) {
         for (SupportMotion support : supports) {
             if (!support.volume().finite() || !support.translation().finite() || !support.pivot().finite() || !support.axis().finite()) {
                 continue;
             }
-            if (!restingOn(body, support, config)) {
+            if (!ridingOn(body, support, config)) {
                 continue;
             }
-            Vec3 position = support.angleRadians() == 0.0
-                    ? body.position()
-                    : around(body.position(), support);
-            Aabb bounds = support.angleRadians() == 0.0
-                    ? body.bounds()
-                    : Aabb.enclosing(corners(body.bounds()).stream().map(corner -> around(corner, support)).toList());
-            Rot orientation = body.orientation().turned(support.axis(), support.angleRadians());
+            double maxAngle = Math.toRadians(MAX_RIDE_DEGREES);
+            boolean spin = Math.abs(support.angleRadians()) <= maxAngle && Math.abs(support.angleRadians()) > 1.0e-9;
+            Vec3 tangential = spin ? around(body.position(), support).sub(body.position()) : Vec3.ZERO;
+            Vec3 linear = support.translation().length() <= MAX_RIDE_STEP ? support.translation() : Vec3.ZERO;
+            if (tangential.length() > MAX_RIDE_STEP) {
+                tangential = Vec3.ZERO;
+                spin = false;
+            }
+            Vec3 step = linear.add(tangential);
+            if (step.lengthSquared() < 1.0e-18) {
+                return body;
+            }
+            Vec3 velocity = step.mul(20.0);
+            if (body.velocity().finite()
+                    && body.velocity().y() > TAKEOFF_SPEED
+                    && body.velocity().y() > velocity.y() + TAKEOFF_SPEED) {
+                return body;
+            }
+            if (!integrate) {
+                return new BodyState(body.id(), body.position(), velocity, body.bounds(), body.orientation(), false);
+            }
+            Rot orientation = spin ? body.orientation().turned(support.axis(), support.angleRadians()) : body.orientation();
             return new BodyState(
                     body.id(),
-                    position.add(support.translation()),
-                    body.velocity(),
-                    bounds.translate(support.translation()),
+                    body.position().add(step),
+                    velocity,
+                    body.bounds().translate(step),
                     orientation,
                     false
             );
         }
         return body;
+    }
+
+    /** Kept for callers that still name the coupling carry. It is the capped ride. */
+    public static BodyState carry(BodyState body, List<SupportMotion> supports, AntiClipConfig config) {
+        return ride(body, supports, config, true);
     }
 
     private static Vec3 around(Vec3 point, SupportMotion support) {
@@ -199,6 +279,17 @@ public final class AntiClipStep {
     private static boolean restingOn(BodyState body, SupportMotion support, AntiClipConfig config) {
         double gap = body.bounds().minY() - support.volume().maxY();
         return Math.abs(gap) <= config.restEpsilon() && body.bounds().overlapsHorizontally(support.volume());
+    }
+
+    /**
+     * Resting for the ride uses each block's top, and allows a gap of one block so a single
+     * missed tick does not drop the car off a descending platform.
+     */
+    private static boolean ridingOn(BodyState body, SupportMotion support, AntiClipConfig config) {
+        double gap = body.bounds().minY() - support.volume().maxY();
+        return gap >= -config.restEpsilon()
+                && gap <= Math.max(config.restEpsilon(), RIDE_WINDOW)
+                && body.bounds().overlapsHorizontally(support.volume());
     }
 
     static boolean resting(BodyState body, List<SupportMotion> supports, AntiClipConfig config) {
