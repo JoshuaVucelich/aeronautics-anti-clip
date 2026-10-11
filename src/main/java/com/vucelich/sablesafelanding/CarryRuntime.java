@@ -22,7 +22,9 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Parents a sub-level that is resting on a world contraption to that contraption's substep motion.
@@ -31,6 +33,10 @@ import java.util.List;
 public final class CarryRuntime {
     private static final net.minecraft.world.phys.Vec3 ROTATION_OFFSET = new net.minecraft.world.phys.Vec3(0.5, 0.5, 0.5);
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
+    private static final Map<String, Sample> SAMPLES = new HashMap<>();
+
+    private record Sample(double x, double y, double z, float angle) {
+    }
 
     private CarryRuntime() {
     }
@@ -49,8 +55,6 @@ public final class CarryRuntime {
             if (!config.carry() && !config.sweep()) {
                 return;
             }
-            float partial = (float) system.getPartialPhysicsTick();
-            float previous = (float) (system.getPartialPhysicsTick() - event.getTimeStep() * 20.0);
             List<SupportMotion> supports = new ArrayList<>();
             int seen = 0;
             for (Entity candidate : level.getAllEntities()) {
@@ -60,7 +64,7 @@ public final class CarryRuntime {
                 if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
                     break;
                 }
-                supports.addAll(blocks(entity, previous, partial));
+                supports.addAll(blocks(level.dimension().location().toString(), entity));
             }
             if (supports.isEmpty()) {
                 return;
@@ -81,27 +85,46 @@ public final class CarryRuntime {
         }
     }
 
-    private static List<SupportMotion> blocks(AbstractContraptionEntity entity, float previous, float partial) {
+    public static void clear() {
+        SAMPLES.clear();
+    }
+
+    public static void forgetDimension(String dimension) {
+        String prefix = dimension + "\0";
+        SAMPLES.keySet().removeIf(key -> key.startsWith(prefix));
+    }
+
+    /**
+     * Block-entity ticks move the contraption and then the entity copies that pose into its
+     * previous position before the next pre-physics event. Sampling here is what still sees
+     * the motion. The first sample stores the pose and applies no delta.
+     */
+    private static List<SupportMotion> blocks(String dimension, AbstractContraptionEntity entity) {
         Contraption contraption = entity.getContraption();
         if (contraption == null || contraption.getBlocks().isEmpty()) {
             return List.of();
         }
-        net.minecraft.world.phys.Vec3 anchor0 = entity.getPrevAnchorVec().lerp(entity.getAnchorVec(), previous);
-        net.minecraft.world.phys.Vec3 anchor1 = entity.getPrevAnchorVec().lerp(entity.getAnchorVec(), partial);
+        net.minecraft.world.phys.Vec3 anchor1 = entity.getAnchorVec();
+        float angle1 = entity instanceof ControlledContraptionEntity controlled ? controlled.getAngle(1.0f) : 0.0f;
+        String id = entity.getUUID().toString();
+        String key = dimension + "\0" + id;
+        Sample last = SAMPLES.put(key, new Sample(anchor1.x, anchor1.y, anchor1.z, angle1));
+        net.minecraft.world.phys.Vec3 anchor0 = last == null
+                ? anchor1
+                : new net.minecraft.world.phys.Vec3(last.x, last.y, last.z);
         net.minecraft.world.phys.Vec3 shift = anchor1.subtract(anchor0);
         Vec3 translation = new Vec3(shift.x, shift.y, shift.z);
         Vec3 pivot = new Vec3(anchor0.x + 0.5, anchor0.y + 0.5, anchor0.z + 0.5);
         Vec3 axis = new Vec3(0.0, 1.0, 0.0);
         double angle = 0.0;
-        if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
+        if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null && last != null) {
             axis = axis(controlled.getRotationAxis());
-            angle = Math.toRadians(Mth.wrapDegrees(controlled.getAngle(partial) - controlled.getAngle(previous)));
+            angle = Math.toRadians(Mth.wrapDegrees(angle1 - last.angle));
         }
-        String id = entity.getUUID().toString();
         List<Aabb> boxes = new ArrayList<>();
         for (BlockPos pos : contraption.getBlocks().keySet()) {
             Aabb local = new Aabb(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0);
-            boxes.add(Aabb.enclosing(corners(entity, local, anchor0, previous)));
+            boxes.add(Aabb.enclosing(corners(entity, local, anchor0, 0.0f)));
         }
         List<SupportMotion> supports = new ArrayList<>();
         for (Aabb world : AabbMerger.merge(boxes)) {

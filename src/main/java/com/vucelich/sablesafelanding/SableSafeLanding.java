@@ -36,10 +36,12 @@ public final class SableSafeLanding {
         String dimension = level.dimension().location().toString();
         ColliderFeedRuntime.forgetDimension(dimension);
         VoidRescueRuntime.forgetDimension(dimension);
+        CarryRuntime.forgetDimension(dimension);
     }
 
     private static void onStop(ServerStoppingEvent event) {
         ColliderFeedRuntime.clear();
         VoidRescueRuntime.clear();
+        CarryRuntime.clear();
     }
 }
