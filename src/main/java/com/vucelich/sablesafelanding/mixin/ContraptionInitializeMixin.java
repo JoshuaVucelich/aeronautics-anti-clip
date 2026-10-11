@@ -13,30 +13,27 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * Sable still owns contraptions that already live inside a sub-level.
  * <p>
  * Sable 2.0.3's contraption mixin has the default priority of 1000. Mixin 0.8.7 applies a
- * higher priority later, so 1100 runs after {@code sable$contraptionInitialize} exists.
- * {@code require = 0} keeps a missing target from crashing startup. Ownership is taken only
- * after this hook actually runs.
+ * higher priority later. Sable's initializer is an inject on {@code tick} at {@code Map.entrySet},
+ * and Mixin strips its unused callback argument while that mixin is still being applied, so a
+ * later mixin cannot target {@code sable$contraptionInitialize}. This hook runs at the same
+ * invoke, after it returns, which is after Sable has added its kinematic. Ownership is taken
+ * only when this hook runs. {@code require = 0} keeps a missing target from crashing startup.
  */
 @Mixin(value = AbstractContraptionEntity.class, priority = 1100, remap = false)
 public abstract class ContraptionInitializeMixin {
-    /**
-     * Sable 2.0.3's handler never reads its {@code CallbackInfo}, so Mixin strips that argument
-     * and the method on the class is {@code sable$contraptionInitialize()V}. The descriptor with
-     * {@code CallbackInfo} is kept as a second optional target for a build that still has it.
-     */
-    @Inject(method = "sable$contraptionInitialize()V", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
-    private void sableSafeLanding$skipOwnedInit(CallbackInfo ci) {
+    @Inject(
+            method = "tick",
+            at = @At(value = "INVOKE", target = "Ljava/util/Map;entrySet()Ljava/util/Set;", shift = At.Shift.AFTER),
+            require = 0,
+            remap = false
+    )
+    private void sableSafeLanding$afterSableInit(CallbackInfo ci) {
         AbstractContraptionEntity entity = (AbstractContraptionEntity) (Object) this;
         ColliderFeedRuntime.noteHook(entity);
         if (ColliderFeedRuntime.shouldOwn(entity)) {
             ColliderFeedRuntime.claim(entity);
-            ci.cancel();
+            ColliderFeedRuntime.displaceSable(entity);
         }
-    }
-
-    @Inject(method = "sable$contraptionInitialize(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
-    private void sableSafeLanding$skipOwnedInitWithCallback(CallbackInfo ci) {
-        sableSafeLanding$skipOwnedInit(ci);
     }
 
     @Inject(method = "sable$shouldCollide", at = @At("HEAD"), cancellable = true, require = 0, remap = false)

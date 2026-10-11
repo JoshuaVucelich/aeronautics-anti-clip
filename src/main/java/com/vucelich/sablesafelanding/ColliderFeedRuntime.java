@@ -9,6 +9,7 @@ import com.vucelich.sablesafelanding.sim.FeedAction;
 import com.vucelich.sablesafelanding.sim.FeedRequest;
 import dev.ryanhcode.sable.Sable;
 import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
+import dev.ryanhcode.sable.api.sublevel.KinematicContraption;
 import dev.ryanhcode.sable.neoforge.event.ForgeSablePrePhysicsTickEvent;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.server.level.ServerLevel;
@@ -48,7 +49,7 @@ public final class ColliderFeedRuntime {
     }
 
     /**
-     * Sable's initializer was cancelled, so this mod may upload the collider.
+     * The tick hook ran and this mod is taking the collider. Sable's kinematic is removed first.
      */
     public static void claim(AbstractContraptionEntity entity) {
         if (onServerThread(entity)) {
@@ -62,6 +63,24 @@ public final class ColliderFeedRuntime {
 
     public static boolean isClaimed(String id) {
         return CLAIMED.contains(id);
+    }
+
+    /**
+     * Sable's initializer already added this entity to the pipeline. Drop that kinematic before
+     * this mod uploads its own collider. Server thread only.
+     */
+    public static void displaceSable(AbstractContraptionEntity entity) {
+        if (!(entity.level() instanceof ServerLevel level) || !onServerThread(entity)) {
+            return;
+        }
+        if (!(entity instanceof KinematicContraption kinematic)) {
+            return;
+        }
+        try {
+            SubLevelPhysicsSystem.require(level).getPipeline().remove(kinematic);
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+        }
     }
 
     public static void clear() {

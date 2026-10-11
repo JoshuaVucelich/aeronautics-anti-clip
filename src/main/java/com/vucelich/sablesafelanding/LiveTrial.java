@@ -320,6 +320,11 @@ public final class LiveTrial {
     }
 
     private static void activate(Scene scene) {
+        contraption = attached(controller);
+        if (contraption != null && contraption.isAlive()) {
+            log("{} already assembled {}", scene.name, contraption);
+            return;
+        }
         if (controller instanceof MechanicalBearingBlockEntity bearing) {
             bearing.assemble();
             if (bearing.getLastAssemblyException() != null) {
