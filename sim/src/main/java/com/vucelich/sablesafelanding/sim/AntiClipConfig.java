@@ -43,7 +43,7 @@ public record AntiClipConfig(
                 4.0,
                 -32.0,
                 16,
-                0
+                4096
         );
     }
 

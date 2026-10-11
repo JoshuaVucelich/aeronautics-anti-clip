@@ -62,8 +62,19 @@ public final class SafePoseTracker {
         return body.position().sub(saved.position()).lengthSquared() <= MAX_DISTANCE * MAX_DISTANCE;
     }
 
+    public void put(String dimension, String id, PoseSnapshot snapshot) {
+        if (snapshot != null && snapshot.finite()) {
+            poses.put(key(dimension, id), snapshot);
+        }
+    }
+
     public void forget(String dimension, String id) {
         poses.remove(key(dimension, id));
+    }
+
+    public void forgetDimension(String dimension) {
+        String prefix = dimension + "\u0000";
+        poses.keySet().removeIf(key -> key.startsWith(prefix));
     }
 
     public int size() {

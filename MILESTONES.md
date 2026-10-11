@@ -16,10 +16,10 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 
 ## M1 — Void rescue
 
-- Remember each sub-level's last safe pose.
-- Restore it when the bounds drop below the dimension min build height, or come within the approach margin of Sable's remove bounds.
-- If no safe pose exists, clamp back inside the world and zero velocity. Do not let Sable delete the body.
-- Repro: `VoidRescueTest` (below min build height, and near `sub_level_remove_min`).
+- Remember each sub-level's last safe pose, keyed by dimension and ship id.
+- Shift Y in place only when the pose is valid and the bounds are at or just inside Sable's `sub_level_remove` check. Min build height is not a trigger.
+- An invalid pose with no recent, nearby last safe pose is left for Sable. It is not rebuilt at the origin.
+- Repro: `VoidRescueTest` (in-place clamp at the remove bound, fail-open NaN, stale or distant last safe pose ignored).
 
 ## M2 — Contraption colliders in Sable/Rapier
 
@@ -41,4 +41,4 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 
 - Spatial hash, merged support boxes, NaN rejection, per-feature kill switches, and a rate-limited failure path.
 - Repro: `HardeningTest`.
-- Version `0.6.0-rc.1` jar. Still not published to Modrinth or CurseForge.
+- Version `0.6.0-rc.2` jar. Still not published to Modrinth or CurseForge.

@@ -24,6 +24,11 @@ public final class AntiClipStep {
         tracker.retain(Set.of());
     }
 
+    public void forgetDimension(String dimension) {
+        idsByDimension.remove(dimension);
+        tracker.forgetDimension(dimension);
+    }
+
     /**
      * Dimension and game time for the next {@link #step}. Poses are stored under this dimension.
      */
@@ -58,11 +63,32 @@ public final class AntiClipStep {
         if (dt < 0.0) {
             throw new IllegalArgumentException("dt must be non-negative");
         }
+        ColliderIndex index = new ColliderIndex(supports, config.spatialCell());
         List<BodyState> next = new ArrayList<>(bodies.size());
         for (BodyState body : bodies) {
-            next.add(stepOne(body, supports, world, config, dt));
+            List<SupportMotion> local = index.nearby(queryBounds(body, config, dt), config.maxPairChecks());
+            next.add(stepOne(body, local, world, config, dt));
         }
         return List.copyOf(next);
+    }
+
+    private static Aabb queryBounds(BodyState body, AntiClipConfig config, double dt) {
+        Aabb bounds = body.bounds();
+        if (!bounds.finite()) {
+            return bounds;
+        }
+        if (config.sweep() && body.velocity().finite()) {
+            Aabb end = bounds.translate(body.velocity().mul(dt));
+            bounds = new Aabb(
+                    Math.min(bounds.minX(), end.minX()),
+                    Math.min(bounds.minY(), end.minY()),
+                    Math.min(bounds.minZ(), end.minZ()),
+                    Math.max(bounds.maxX(), end.maxX()),
+                    Math.max(bounds.maxY(), end.maxY()),
+                    Math.max(bounds.maxZ(), end.maxZ())
+            );
+        }
+        return bounds.expand(config.restEpsilon());
     }
 
     private BodyState stepOne(BodyState body, List<SupportMotion> supports, RescueBounds world, AntiClipConfig config, double dt) {

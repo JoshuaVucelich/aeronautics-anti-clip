@@ -4,6 +4,8 @@ import com.vucelich.sablesafelanding.sim.Aabb;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import com.vucelich.sablesafelanding.sim.AntiClipStep;
 import com.vucelich.sablesafelanding.sim.BodyState;
+import com.vucelich.sablesafelanding.sim.RateLimiter;
+import com.vucelich.sablesafelanding.sim.PoseSnapshot;
 import com.vucelich.sablesafelanding.sim.RescueBounds;
 import com.vucelich.sablesafelanding.sim.Rot;
 import com.vucelich.sablesafelanding.sim.SupportMotion;
@@ -32,10 +34,11 @@ import java.util.UUID;
  */
 public final class VoidRescueRuntime {
     private static final AntiClipStep STEP = new AntiClipStep();
-    private static final long LOG_GAP_NANOS = 5_000_000_000L;
-    private static long lastRescueLog;
-    private static long lastFailureLog;
+    private static final RateLimiter RESCUE_LOGS = new RateLimiter(5_000_000_000L);
+    private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static boolean removalHookSeen;
+    private static boolean loggedThread;
+    private static int ticksWithShipsBeforeHook;
 
     /**
      * Set from the removal mixin once Sable's bounding-box invoke was matched.
@@ -52,6 +55,10 @@ public final class VoidRescueRuntime {
         STEP.clear();
     }
 
+    public static void forgetDimension(String dimension) {
+        STEP.forgetDimension(dimension);
+    }
+
     private VoidRescueRuntime() {
     }
 
@@ -63,6 +70,10 @@ public final class VoidRescueRuntime {
         if (!system.getLevel().getServer().isSameThread()) {
             SableSafeLanding.LOGGER.warn("Ignoring pre-physics rescue off the server thread");
             return;
+        }
+        if (!loggedThread) {
+            loggedThread = true;
+            SableSafeLanding.LOGGER.info("ForgeSablePrePhysicsTickEvent thread {}", Thread.currentThread().getName());
         }
         SubLevelContainer container = SubLevelContainer.getContainer(system.getLevel());
         if (!(container instanceof ServerSubLevelContainer server)) {
@@ -76,6 +87,11 @@ public final class VoidRescueRuntime {
             }
             live.add(subLevel.getUniqueId().toString());
             consider(subLevel, pipeline);
+        }
+        if (!removalHookSeen && !live.isEmpty() && ++ticksWithShipsBeforeHook == 40) {
+            SableSafeLanding.LOGGER.warn(
+                    "Sable removal hook has not run; void rescue will not see the post-bounds check. Leaving deletion to Sable when the hook is absent"
+            );
         }
         try {
             STEP.retainDimension(system.getLevel().dimension().location().toString(), live);
@@ -97,7 +113,16 @@ public final class VoidRescueRuntime {
             }
             AntiClipConfig config = SafeLandingConfig.snapshot();
             String dimension = subLevel.getLevel().dimension().location().toString();
-            STEP.bind(dimension, subLevel.getLevel().getGameTime());
+            long time = subLevel.getLevel().getGameTime();
+            String id = subLevel.getUniqueId().toString();
+            STEP.bind(dimension, time);
+            SafePoseSavedData saved = subLevel.getLevel() instanceof ServerLevel serverLevel ? SafePoseSavedData.get(serverLevel) : null;
+            if (saved != null && STEP.tracker().get(dimension, id) == null) {
+                PoseSnapshot stored = saved.recall(id);
+                if (stored != null) {
+                    STEP.tracker().put(dimension, id, stored);
+                }
+            }
             BoundingBox3dc box = subLevel.boundingBox();
             Aabb bounds = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
             RescueBounds world = RescueBounds.of(
@@ -108,6 +133,12 @@ public final class VoidRescueRuntime {
             );
             BodyState before = snapshot(subLevel, bounds);
             BodyState after = STEP.step(List.of(before), List.of(), world, config, 1.0 / 20.0).get(0);
+            if (saved != null) {
+                PoseSnapshot remembered = STEP.tracker().get(dimension, id);
+                if (remembered != null && remembered.time() == time) {
+                    saved.remember(id, remembered);
+                }
+            }
             if (!after.rescued()) {
                 return false;
             }
@@ -126,52 +157,93 @@ public final class VoidRescueRuntime {
      * or took away the velocity that would have tunneled.
      */
     public static void advance(ServerSubLevel subLevel, PhysicsPipeline pipeline, java.util.List<SupportMotion> supports, double dt) {
+        advanceAll(java.util.List.of(subLevel), pipeline, supports, dt);
+    }
+
+    /**
+     * One spatial index for every ship in this substep. Callers must not step ships one at a time.
+     */
+    public static void advanceAll(java.util.List<ServerSubLevel> subLevels, PhysicsPipeline pipeline, java.util.List<SupportMotion> supports, double dt) {
         try {
-            if (subLevel.isRemoved()) {
+            if (subLevels.isEmpty()) {
+                return;
+            }
+            ServerSubLevel first = subLevels.get(0);
+            if (!(first.getLevel() instanceof ServerLevel level) || !level.getServer().isSameThread()) {
                 return;
             }
             AntiClipConfig config = SafeLandingConfig.snapshot();
-            String dimension = subLevel.getLevel().dimension().location().toString();
-            STEP.bind(dimension, subLevel.getLevel().getGameTime());
-            BoundingBox3dc box = subLevel.boundingBox();
-            Aabb bounds = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+            String dimension = level.dimension().location().toString();
+            long time = level.getGameTime();
+            STEP.bind(dimension, time);
+            SafePoseSavedData saved = SafePoseSavedData.get(level);
             RescueBounds world = RescueBounds.of(
-                    subLevel.getLevel().getMinBuildHeight(),
+                    level.getMinBuildHeight(),
                     SableConfig.SUB_LEVEL_REMOVE_MIN.getAsDouble(),
                     SableConfig.SUB_LEVEL_REMOVE_MAX.getAsDouble(),
                     config
             );
-            BodyState before = snapshot(subLevel, bounds).withSolidContact(solidContact(subLevel, supports, config));
-            BodyState after = STEP.step(java.util.List.of(before), supports, world, config, dt).get(0);
-            boolean moved = after.position().sub(before.position()).lengthSquared() > 1.0e-12
-                    || !after.orientation().equals(before.orientation());
-            boolean slowed = after.velocity().sub(before.velocity()).lengthSquared() > 1.0e-12;
-            if (!after.rescued() && !moved && !slowed) {
-                return;
-            }
-            apply(subLevel, pipeline, after, after.rescued());
-            if (!after.rescued()) {
-                Vector3d desired = new Vector3d(after.velocity().x(), after.velocity().y(), after.velocity().z());
-                if (pipeline != null) {
-                    try {
-                        Vector3d current = pipeline.getLinearVelocity(subLevel, new Vector3d());
-                        pipeline.addLinearAndAngularVelocity(
-                                subLevel,
-                                new Vector3d(desired.x - current.x, desired.y - current.y, desired.z - current.z),
-                                new Vector3d()
-                        );
-                    } catch (RuntimeException ex) {
-                        logFailure(ex);
+            java.util.List<ServerSubLevel> live = new java.util.ArrayList<>();
+            java.util.List<BodyState> before = new java.util.ArrayList<>();
+            for (ServerSubLevel subLevel : subLevels) {
+                if (subLevel.isRemoved()) {
+                    continue;
+                }
+                String id = subLevel.getUniqueId().toString();
+                if (STEP.tracker().get(dimension, id) == null) {
+                    PoseSnapshot stored = saved.recall(id);
+                    if (stored != null) {
+                        STEP.tracker().put(dimension, id, stored);
                     }
                 }
-                subLevel.latestLinearVelocity.set(desired);
+                BoundingBox3dc box = subLevel.boundingBox();
+                Aabb bounds = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+                live.add(subLevel);
+                before.add(snapshot(subLevel, bounds).withSolidContact(solidContact(subLevel, supports, config)));
             }
-            subLevel.updateBoundingBox();
-            if (after.rescued()) {
-                logRescue(subLevel.getUniqueId());
+            if (live.isEmpty()) {
+                return;
+            }
+            java.util.List<BodyState> after = STEP.step(before, supports, world, config, dt);
+            for (int i = 0; i < live.size(); i++) {
+                finish(live.get(i), pipeline, before.get(i), after.get(i), saved, time);
             }
         } catch (RuntimeException ex) {
             logFailure(ex);
+        }
+    }
+
+    private static void finish(ServerSubLevel subLevel, PhysicsPipeline pipeline, BodyState before, BodyState after, SafePoseSavedData saved, long time) {
+        PoseSnapshot remembered = STEP.tracker().get(subLevel.getLevel().dimension().location().toString(), subLevel.getUniqueId().toString());
+        if (remembered != null && remembered.time() == time) {
+            saved.remember(subLevel.getUniqueId().toString(), remembered);
+        }
+        boolean moved = after.position().sub(before.position()).lengthSquared() > 1.0e-12
+                || !after.orientation().equals(before.orientation());
+        boolean slowed = after.velocity().sub(before.velocity()).lengthSquared() > 1.0e-12;
+        if (!after.rescued() && !moved && !slowed) {
+            return;
+        }
+        apply(subLevel, pipeline, after, after.rescued());
+        if (!after.rescued()) {
+            Vector3d desired = new Vector3d(after.velocity().x(), after.velocity().y(), after.velocity().z());
+            if (pipeline != null) {
+                try {
+                    Vector3d current = pipeline.getLinearVelocity(subLevel, new Vector3d());
+                    pipeline.addLinearAndAngularVelocity(
+                            subLevel,
+                            new Vector3d(desired.x - current.x, desired.y - current.y, desired.z - current.z),
+                            new Vector3d()
+                    );
+                } catch (RuntimeException ex) {
+                    logFailure(ex);
+                }
+            }
+            subLevel.latestLinearVelocity.set(desired);
+        }
+        subLevel.updateBoundingBox();
+        if (after.rescued()) {
+            logRescue(subLevel.getUniqueId());
         }
     }
 
@@ -226,20 +298,16 @@ public final class VoidRescueRuntime {
     }
 
     private static void logRescue(UUID id) {
-        long now = System.nanoTime();
-        if (now - lastRescueLog < LOG_GAP_NANOS) {
+        if (!RESCUE_LOGS.tryAcquire(System.nanoTime())) {
             return;
         }
-        lastRescueLog = now;
         SableSafeLanding.LOGGER.info("Rescued sub-level {} from the void", id);
     }
 
     private static void logFailure(RuntimeException ex) {
-        long now = System.nanoTime();
-        if (now - lastFailureLog < LOG_GAP_NANOS) {
+        if (!FAILURE_LOGS.tryAcquire(System.nanoTime())) {
             return;
         }
-        lastFailureLog = now;
         SableSafeLanding.LOGGER.warn("Void rescue failed: {}", ex.toString());
     }
 }

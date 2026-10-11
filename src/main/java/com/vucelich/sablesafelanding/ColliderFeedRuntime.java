@@ -3,6 +3,7 @@ package com.vucelich.sablesafelanding;
 import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.Contraption;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
+import com.vucelich.sablesafelanding.sim.RateLimiter;
 import com.vucelich.sablesafelanding.sim.ColliderFeedPlanner;
 import com.vucelich.sablesafelanding.sim.FeedAction;
 import com.vucelich.sablesafelanding.sim.FeedRequest;
@@ -31,7 +32,7 @@ public final class ColliderFeedRuntime {
     private static final Map<String, Map<String, FedContraptionCollider>> FED = new HashMap<>();
     private static final Set<String> HOOKED = new HashSet<>();
     private static final Set<String> CLAIMED = new HashSet<>();
-    private static long lastFailureLog;
+    private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static boolean deferredWarning;
 
     private ColliderFeedRuntime() {
@@ -59,11 +60,24 @@ public final class ColliderFeedRuntime {
         return !HOOKED.isEmpty();
     }
 
+    public static boolean isClaimed(String id) {
+        return CLAIMED.contains(id);
+    }
+
     public static void clear() {
         PLANNERS.clear();
         FED.clear();
         HOOKED.clear();
         CLAIMED.clear();
+    }
+
+    public static void forgetDimension(String dimension) {
+        PLANNERS.remove(dimension);
+        Map<String, FedContraptionCollider> fed = FED.remove(dimension);
+        if (fed != null) {
+            HOOKED.removeAll(fed.keySet());
+            CLAIMED.removeAll(fed.keySet());
+        }
     }
 
     private static boolean onServerThread(AbstractContraptionEntity entity) {
@@ -195,11 +209,9 @@ public final class ColliderFeedRuntime {
     }
 
     private static void logFailure(RuntimeException ex) {
-        long now = System.nanoTime();
-        if (now - lastFailureLog < 5_000_000_000L) {
+        if (!FAILURE_LOGS.tryAcquire(System.nanoTime())) {
             return;
         }
-        lastFailureLog = now;
         SableSafeLanding.LOGGER.warn("Contraption collider feed failed: {}", ex.toString());
     }
 }

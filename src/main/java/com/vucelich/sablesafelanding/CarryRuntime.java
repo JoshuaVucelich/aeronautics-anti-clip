@@ -4,7 +4,9 @@ import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.Contraption;
 import com.simibubi.create.content.contraptions.ControlledContraptionEntity;
 import com.vucelich.sablesafelanding.sim.Aabb;
+import com.vucelich.sablesafelanding.sim.AabbMerger;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
+import com.vucelich.sablesafelanding.sim.RateLimiter;
 import com.vucelich.sablesafelanding.sim.SupportMotion;
 import com.vucelich.sablesafelanding.sim.Vec3;
 import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
@@ -28,7 +30,7 @@ import java.util.List;
  */
 public final class CarryRuntime {
     private static final net.minecraft.world.phys.Vec3 ROTATION_OFFSET = new net.minecraft.world.phys.Vec3(0.5, 0.5, 0.5);
-    private static long lastFailureLog;
+    private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
 
     private CarryRuntime() {
     }
@@ -36,6 +38,10 @@ public final class CarryRuntime {
     public static void onPrePhysics(ForgeSablePrePhysicsTickEvent event) {
         SubLevelPhysicsSystem system = event.getPhysicsSystem();
         if (system == null || !(system.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        if (!level.getServer().isSameThread()) {
+            SableSafeLanding.LOGGER.warn("Ignoring contraption carry off the server thread");
             return;
         }
         try {
@@ -46,10 +52,15 @@ public final class CarryRuntime {
             float partial = (float) system.getPartialPhysicsTick();
             float previous = (float) (system.getPartialPhysicsTick() - event.getTimeStep() * 20.0);
             List<SupportMotion> supports = new ArrayList<>();
+            int seen = 0;
             for (Entity candidate : level.getAllEntities()) {
-                if (candidate instanceof AbstractContraptionEntity entity && ColliderFeedRuntime.isWorldSupport(entity)) {
-                    supports.addAll(blocks(entity, previous, partial));
+                if (!(candidate instanceof AbstractContraptionEntity entity) || !ColliderFeedRuntime.isWorldSupport(entity)) {
+                    continue;
                 }
+                if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
+                    break;
+                }
+                supports.addAll(blocks(entity, previous, partial));
             }
             if (supports.isEmpty()) {
                 return;
@@ -58,12 +69,13 @@ public final class CarryRuntime {
                 return;
             }
             PhysicsPipeline pipeline = system.getPipeline();
+            java.util.List<ServerSubLevel> ships = new java.util.ArrayList<>();
             for (ServerSubLevel subLevel : container.getAllSubLevels()) {
-                if (subLevel.isRemoved()) {
-                    continue;
+                if (!subLevel.isRemoved()) {
+                    ships.add(subLevel);
                 }
-                VoidRescueRuntime.advance(subLevel, pipeline, supports, event.getTimeStep());
             }
+            VoidRescueRuntime.advanceAll(ships, pipeline, supports, event.getTimeStep());
         } catch (RuntimeException ex) {
             logFailure(ex);
         }
@@ -86,10 +98,13 @@ public final class CarryRuntime {
             angle = Math.toRadians(Mth.wrapDegrees(controlled.getAngle(partial) - controlled.getAngle(previous)));
         }
         String id = entity.getUUID().toString();
-        List<SupportMotion> supports = new ArrayList<>();
+        List<Aabb> boxes = new ArrayList<>();
         for (BlockPos pos : contraption.getBlocks().keySet()) {
             Aabb local = new Aabb(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0);
-            Aabb world = Aabb.enclosing(corners(entity, local, anchor0, previous));
+            boxes.add(Aabb.enclosing(corners(entity, local, anchor0, previous)));
+        }
+        List<SupportMotion> supports = new ArrayList<>();
+        for (Aabb world : AabbMerger.merge(boxes)) {
             supports.add(new SupportMotion(id, world, translation, pivot, axis, angle));
         }
         return supports;
@@ -130,11 +145,9 @@ public final class CarryRuntime {
     }
 
     private static void logFailure(RuntimeException ex) {
-        long now = System.nanoTime();
-        if (now - lastFailureLog < 5_000_000_000L) {
+        if (!FAILURE_LOGS.tryAcquire(System.nanoTime())) {
             return;
         }
-        lastFailureLog = now;
         SableSafeLanding.LOGGER.warn("Contraption carry failed: {}", ex.toString());
     }
 }
