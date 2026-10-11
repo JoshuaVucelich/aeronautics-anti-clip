@@ -34,7 +34,7 @@ public record AntiClipConfig(
         return new AntiClipConfig(
                 true,
                 true,
-                true,
+                false,
                 true,
                 1.0,
                 8.0,

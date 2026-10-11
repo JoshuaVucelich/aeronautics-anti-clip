@@ -1,5 +1,7 @@
 package com.vucelich.sablesafelanding.sim;
 
+import java.util.List;
+
 /**
  * Axis-aligned box in block coordinates. Max edges are exclusive in the same sense as a
  * Minecraft bounding box: a full block at the origin is {@code [0,1)} on each axis.
@@ -34,6 +36,27 @@ public record Aabb(double minX, double minY, double minZ, double maxX, double ma
     public boolean finite() {
         return Double.isFinite(minX) && Double.isFinite(minY) && Double.isFinite(minZ)
                 && Double.isFinite(maxX) && Double.isFinite(maxY) && Double.isFinite(maxZ);
+    }
+
+    public static Aabb enclosing(List<Vec3> points) {
+        if (points.isEmpty()) {
+            throw new IllegalArgumentException("no points");
+        }
+        double minX = Double.POSITIVE_INFINITY;
+        double minY = Double.POSITIVE_INFINITY;
+        double minZ = Double.POSITIVE_INFINITY;
+        double maxX = Double.NEGATIVE_INFINITY;
+        double maxY = Double.NEGATIVE_INFINITY;
+        double maxZ = Double.NEGATIVE_INFINITY;
+        for (Vec3 point : points) {
+            minX = Math.min(minX, point.x());
+            minY = Math.min(minY, point.y());
+            minZ = Math.min(minZ, point.z());
+            maxX = Math.max(maxX, point.x());
+            maxY = Math.max(maxY, point.y());
+            maxZ = Math.max(maxZ, point.z());
+        }
+        return new Aabb(minX, minY, minZ, maxX, maxY, maxZ);
     }
 
     public Aabb expand(double amount) {

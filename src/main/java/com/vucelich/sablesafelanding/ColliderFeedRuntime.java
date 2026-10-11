@@ -72,14 +72,18 @@ public final class ColliderFeedRuntime {
 
     public static boolean shouldOwn(AbstractContraptionEntity entity) {
         try {
+            return isWorldSupport(entity) && SafeLandingConfig.snapshot().feedColliders();
+        } catch (RuntimeException ex) {
+            return false;
+        }
+    }
+
+    public static boolean isWorldSupport(AbstractContraptionEntity entity) {
+        try {
             if (!(entity.level() instanceof ServerLevel)) {
                 return false;
             }
-            if (!SafeLandingConfig.snapshot().feedColliders()) {
-                return false;
-            }
-            Contraption contraption = entity.getContraption();
-            if (ContraptionKinds.nameOf(contraption) == null) {
+            if (ContraptionKinds.nameOf(entity.getContraption()) == null) {
                 return false;
             }
             return Sable.HELPER.getContaining(entity) == null;

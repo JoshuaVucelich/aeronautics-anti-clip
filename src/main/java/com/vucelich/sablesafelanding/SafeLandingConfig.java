@@ -4,7 +4,7 @@ import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.3.0";
+    public static final String VERSION = "0.4.0";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -29,7 +29,7 @@ public final class SafeLandingConfig {
                 .comment("Feed moving elevator, bearing, piston, and gantry colliders into Sable/Rapier.")
                 .define("feedColliders", defaults.feedColliders());
         CARRY = builder
-                .comment("Parent sub-levels that are resting on a moving contraption so they move with it.")
+                .comment("Parent a resting sub-level to a contraption. Off by default so a ship can lift off. Upward speed above half a block per second is never carried.")
                 .define("carry", defaults.carry());
         SWEEP = builder
                 .comment("Swept test that limits how far a fast sub-level may penetrate a contraption.")

@@ -1,0 +1,196 @@
+package com.vucelich.sablesafelanding;
+
+import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
+import com.simibubi.create.content.contraptions.Contraption;
+import com.simibubi.create.content.contraptions.ControlledContraptionEntity;
+import com.vucelich.sablesafelanding.sim.Aabb;
+import com.vucelich.sablesafelanding.sim.AntiClipConfig;
+import com.vucelich.sablesafelanding.sim.AntiClipStep;
+import com.vucelich.sablesafelanding.sim.BodyState;
+import com.vucelich.sablesafelanding.sim.Rot;
+import com.vucelich.sablesafelanding.sim.SupportMotion;
+import com.vucelich.sablesafelanding.sim.Vec3;
+import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
+import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
+import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
+import dev.ryanhcode.sable.neoforge.event.ForgeSablePrePhysicsTickEvent;
+import dev.ryanhcode.sable.sublevel.ServerSubLevel;
+import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import org.joml.Quaterniond;
+import org.joml.Quaterniondc;
+import org.joml.Vector3d;
+import org.joml.Vector3dc;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Parents a sub-level that is resting on a world contraption to that contraption's substep motion.
+ * The anchor is lerped the way Sable lerps it, so the carried pose matches the kinematic body.
+ */
+public final class CarryRuntime {
+    private static final net.minecraft.world.phys.Vec3 ROTATION_OFFSET = new net.minecraft.world.phys.Vec3(0.5, 0.5, 0.5);
+    private static long lastFailureLog;
+
+    private CarryRuntime() {
+    }
+
+    public static void onPrePhysics(ForgeSablePrePhysicsTickEvent event) {
+        SubLevelPhysicsSystem system = event.getPhysicsSystem();
+        if (system == null || !(system.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        try {
+            AntiClipConfig config = SafeLandingConfig.snapshot();
+            if (!config.carry()) {
+                return;
+            }
+            float partial = (float) system.getPartialPhysicsTick();
+            float previous = (float) (system.getPartialPhysicsTick() - event.getTimeStep() * 20.0);
+            List<SupportMotion> supports = new ArrayList<>();
+            for (Entity candidate : level.getAllEntities()) {
+                if (candidate instanceof AbstractContraptionEntity entity && ColliderFeedRuntime.isWorldSupport(entity)) {
+                    supports.addAll(blocks(entity, previous, partial));
+                }
+            }
+            if (supports.isEmpty()) {
+                return;
+            }
+            if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
+                return;
+            }
+            PhysicsPipeline pipeline = system.getPipeline();
+            for (ServerSubLevel subLevel : container.getAllSubLevels()) {
+                if (subLevel.isRemoved()) {
+                    continue;
+                }
+                carryOne(subLevel, pipeline, supports, config, event.getTimeStep());
+            }
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+        }
+    }
+
+    private static void carryOne(
+            ServerSubLevel subLevel,
+            PhysicsPipeline pipeline,
+            List<SupportMotion> supports,
+            AntiClipConfig config,
+            double dt
+    ) {
+        BoundingBox3dc box = subLevel.boundingBox();
+        Aabb bounds = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+        Vector3dc position = subLevel.logicalPose().position();
+        Quaterniondc orientation = subLevel.logicalPose().orientation();
+        Vector3d velocity = subLevel.latestLinearVelocity;
+        BodyState before = new BodyState(
+                subLevel.getUniqueId().toString(),
+                new Vec3(position.x(), position.y(), position.z()),
+                new Vec3(velocity.x, velocity.y, velocity.z),
+                bounds,
+                new Rot(orientation.x(), orientation.y(), orientation.z(), orientation.w()),
+                false
+        );
+        BodyState after = AntiClipStep.carry(before, supports, config);
+        if (after.position().sub(before.position()).lengthSquared() < 1.0e-12
+                && after.orientation().equals(before.orientation())) {
+            return;
+        }
+        Vector3d next = new Vector3d(after.position().x(), after.position().y(), after.position().z());
+        Rot rot = after.orientation();
+        Quaterniond nextRot = new Quaterniond(rot.x(), rot.y(), rot.z(), rot.w());
+        Vec3 delta = after.position().sub(before.position());
+        Vector3d platformVelocity = new Vector3d(delta.x() / dt, delta.y() / dt, delta.z() / dt);
+        try {
+            if (pipeline != null) {
+                pipeline.teleport(subLevel, next, nextRot);
+                pipeline.resetVelocity(subLevel);
+                pipeline.addLinearAndAngularVelocity(subLevel, platformVelocity, new Vector3d());
+            } else {
+                subLevel.logicalPose().position().set(next);
+                subLevel.logicalPose().orientation().set(nextRot);
+            }
+        } catch (RuntimeException ex) {
+            subLevel.logicalPose().position().set(next);
+            subLevel.logicalPose().orientation().set(nextRot);
+            logFailure(ex);
+        }
+        subLevel.latestLinearVelocity.set(platformVelocity);
+        subLevel.updateBoundingBox();
+    }
+
+    private static List<SupportMotion> blocks(AbstractContraptionEntity entity, float previous, float partial) {
+        Contraption contraption = entity.getContraption();
+        if (contraption == null || contraption.getBlocks().isEmpty()) {
+            return List.of();
+        }
+        net.minecraft.world.phys.Vec3 anchor0 = entity.getPrevAnchorVec().lerp(entity.getAnchorVec(), previous);
+        net.minecraft.world.phys.Vec3 anchor1 = entity.getPrevAnchorVec().lerp(entity.getAnchorVec(), partial);
+        net.minecraft.world.phys.Vec3 shift = anchor1.subtract(anchor0);
+        Vec3 translation = new Vec3(shift.x, shift.y, shift.z);
+        Vec3 pivot = new Vec3(anchor0.x + 0.5, anchor0.y + 0.5, anchor0.z + 0.5);
+        Vec3 axis = new Vec3(0.0, 1.0, 0.0);
+        double angle = 0.0;
+        if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
+            axis = axis(controlled.getRotationAxis());
+            angle = Math.toRadians(Mth.wrapDegrees(controlled.getAngle(partial) - controlled.getAngle(previous)));
+        }
+        String id = entity.getUUID().toString();
+        List<SupportMotion> supports = new ArrayList<>();
+        for (BlockPos pos : contraption.getBlocks().keySet()) {
+            Aabb local = new Aabb(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0);
+            Aabb world = Aabb.enclosing(corners(entity, local, anchor0, previous));
+            supports.add(new SupportMotion(id, world, translation, pivot, axis, angle));
+        }
+        return supports;
+    }
+
+    private static List<Vec3> corners(AbstractContraptionEntity entity, Aabb local, net.minecraft.world.phys.Vec3 anchor, float partial) {
+        double[] xs = {local.minX(), local.maxX()};
+        double[] ys = {local.minY(), local.maxY()};
+        double[] zs = {local.minZ(), local.maxZ()};
+        List<Vec3> points = new ArrayList<>(8);
+        for (double x : xs) {
+            for (double y : ys) {
+                for (double z : zs) {
+                    net.minecraft.world.phys.Vec3 world = toGlobal(entity, new net.minecraft.world.phys.Vec3(x, y, z), anchor, partial);
+                    points.add(new Vec3(world.x, world.y, world.z));
+                }
+            }
+        }
+        return points;
+    }
+
+    private static net.minecraft.world.phys.Vec3 toGlobal(
+            AbstractContraptionEntity entity,
+            net.minecraft.world.phys.Vec3 local,
+            net.minecraft.world.phys.Vec3 anchor,
+            float partial
+    ) {
+        net.minecraft.world.phys.Vec3 rotated = entity.applyRotation(local.subtract(ROTATION_OFFSET), partial);
+        return rotated.add(ROTATION_OFFSET).add(anchor);
+    }
+
+    private static Vec3 axis(Direction.Axis direction) {
+        return switch (direction) {
+            case X -> new Vec3(1.0, 0.0, 0.0);
+            case Y -> new Vec3(0.0, 1.0, 0.0);
+            case Z -> new Vec3(0.0, 0.0, 1.0);
+        };
+    }
+
+    private static void logFailure(RuntimeException ex) {
+        long now = System.nanoTime();
+        if (now - lastFailureLog < 5_000_000_000L) {
+            return;
+        }
+        lastFailureLog = now;
+        SableSafeLanding.LOGGER.warn("Contraption carry failed: {}", ex.toString());
+    }
+}
