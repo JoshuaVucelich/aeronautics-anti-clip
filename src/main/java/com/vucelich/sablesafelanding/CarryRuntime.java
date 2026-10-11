@@ -178,8 +178,9 @@ public final class CarryRuntime {
             if (support == null) {
                 continue;
             }
-            DeckLock existing = LOCKS.get(key);
-            if (existing != null && existing.contraptionId.equals(support.id())) {
+            // Keep the first offset. Recapturing after the car has sunk into the deck, or after a
+            // lookup miss dropped the lock, stores the gap and the car never catches a piston.
+            if (LOCKS.containsKey(key)) {
                 continue;
             }
             boolean moving = support.translation().lengthSquared() > 1.0e-8 || Math.abs(support.angleRadians()) > 1.0e-9;
@@ -210,9 +211,16 @@ public final class CarryRuntime {
             DeckLock lock = entry.getValue();
             String shipId = entry.getKey().substring(prefix.length());
             ServerSubLevel ship = findShip(container, shipId);
-            Entity entity = contraptionEntity(level, lock.contraptionId);
-            if (ship == null || !(entity instanceof AbstractContraptionEntity contraption) || !contraption.isAlive()) {
-                drop.add(entry.getKey());
+            AbstractContraptionEntity contraption = findContraption(level, lock.contraptionId);
+            if (ship == null || contraption == null) {
+                if (PLACEMENT_LOGGED.add(shipId + ":miss")) {
+                    SableSafeLanding.LOGGER.info(
+                            "LIVE deck miss ship={} foundShip={} contraption={}",
+                            shipId,
+                            ship != null,
+                            lock.contraptionId
+                    );
+                }
                 continue;
             }
             net.minecraft.world.phys.Vec3 anchor = contraption.getAnchorVec();
@@ -252,13 +260,14 @@ public final class CarryRuntime {
             ship.updateBoundingBox();
             if (PLACEMENT_LOGGED.add(shipId) || (Math.abs(dy) > 1.0 && PLACEMENT_LOGGED.add(shipId + ":far"))) {
                 SableSafeLanding.LOGGER.info(
-                        "LIVE deck {} y {} -> {} dy={} dx={} dz={}",
+                        "LIVE deck {} y {} -> {} dy={} dx={} dz={} anchorY={}",
                         shipId,
                         fmt(from.y()),
                         fmt(target.y()),
                         fmt(dy),
                         fmt(dx),
-                        fmt(dz)
+                        fmt(dz),
+                        fmt(anchor.y)
                 );
             }
         }
@@ -274,17 +283,26 @@ public final class CarryRuntime {
         return null;
     }
 
-    private static Entity contraptionEntity(ServerLevel level, String id) {
+    private static AbstractContraptionEntity findContraption(ServerLevel level, String id) {
         try {
-            return level.getEntity(UUID.fromString(id));
+            Entity direct = level.getEntity(UUID.fromString(id));
+            if (direct instanceof AbstractContraptionEntity contraption && contraption.isAlive()) {
+                return contraption;
+            }
         } catch (IllegalArgumentException ex) {
             return null;
         }
+        for (Entity candidate : level.getAllEntities()) {
+            if (candidate.getUUID().toString().equals(id) && candidate instanceof AbstractContraptionEntity contraption && contraption.isAlive()) {
+                return contraption;
+            }
+        }
+        return null;
     }
 
     private static float deckAngle(ServerLevel level, String id) {
-        Entity entity = contraptionEntity(level, id);
-        if (entity instanceof AbstractContraptionEntity contraption) {
+        AbstractContraptionEntity contraption = findContraption(level, id);
+        if (contraption != null) {
             return deckAngle(contraption);
         }
         return 0.0f;

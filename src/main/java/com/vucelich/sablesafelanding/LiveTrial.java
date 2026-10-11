@@ -364,10 +364,11 @@ public final class LiveTrial {
         String platform = contraption == null ? "none" : PlatformTrace.get(contraption.getUUID().toString());
         String ride = PlatformTrace.get("ride:" + ship.getUniqueId());
         org.joml.Vector3d velocity = ship.latestLinearVelocity;
-        log("{} outcome={} seated={} removed={} claimed={} dY={} dAnchor={} dX={} dZ={} minY={} anchorY={} velY={} platform=[{}] ride=[{}]",
+        log("{} outcome={} seated={} removed={} claimed={} dY={} dAnchor={} dX={} dZ={} minY={} posY={} anchorY={} velY={} platform=[{}] ride=[{}]",
                 scene.name, outcome, seated, ship.isRemoved(),
                 contraption != null && ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()),
-                fmt(dY), fmt(dAnchor), fmt(dX), fmt(dZ), fmt(box.minY()), fmt(anchorY), fmt(velocity.y),
+                fmt(dY), fmt(dAnchor), fmt(dX), fmt(dZ), fmt(box.minY()), fmt(ship.logicalPose().position().y()),
+                fmt(anchorY), fmt(velocity.y),
                 platform, ride);
     }
 
