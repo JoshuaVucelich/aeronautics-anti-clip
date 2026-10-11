@@ -14,7 +14,7 @@ class HarnessBaselineTest {
         assertTrue(config.feedColliders());
         assertTrue(config.carry());
         assertTrue(config.sweep());
-        assertEquals(64.0, config.approachMargin());
+        assertEquals(1.0, config.approachMargin());
         assertEquals(0.05, config.maxPenetration());
         assertEquals(-32.0, config.gravity());
     }

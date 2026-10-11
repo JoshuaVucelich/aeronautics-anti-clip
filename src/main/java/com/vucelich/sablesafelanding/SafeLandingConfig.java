@@ -4,7 +4,7 @@ import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.1.0";
+    public static final String VERSION = "0.2.0";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -23,7 +23,7 @@ public final class SafeLandingConfig {
         builder.comment("Aeronautics Anti-Clip. This mod is not published to Modrinth or CurseForge.");
 
         VOID_RESCUE = builder
-                .comment("Restore a sub-level that falls out of the world or nears Sable's sub_level_remove bounds.")
+                .comment("Shift a sub-level's Y back inside Sable's sub_level_remove bounds before Sable deletes it.")
                 .define("voidRescue", defaults.voidRescue());
         FEED_COLLIDERS = builder
                 .comment("Feed moving elevator, bearing, piston, and gantry colliders into Sable/Rapier.")
@@ -35,7 +35,7 @@ public final class SafeLandingConfig {
                 .comment("Swept test that limits how far a fast sub-level may penetrate a contraption.")
                 .define("sweep", defaults.sweep());
         APPROACH_MARGIN = builder
-                .comment("Blocks inside Sable's sub_level_remove_min/max at which a rescue starts.")
+                .comment("Blocks before Sable's sub_level_remove_min/max at which a rescue starts. One block matches the deletion check.")
                 .defineInRange("approachMargin", defaults.approachMargin(), 0.0, 100_000.0);
         SAFE_CLEARANCE = builder
                 .comment("Extra blocks inside the approach margin required before a pose is remembered as safe.")

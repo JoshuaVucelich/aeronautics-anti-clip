@@ -36,6 +36,11 @@ neoForge {
 
 dependencies {
     implementation project(':sim')
+    compileOnly("dev.ryanhcode.sable:sable-neoforge-${minecraft_version}:${sable_version}") {
+        exclude group: 'foundry.veil'
+        exclude group: 'com.simibubi.create'
+    }
+    compileOnly "dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:${companion_version}"
 }
 
 tasks.named('jar', Jar).configure {
