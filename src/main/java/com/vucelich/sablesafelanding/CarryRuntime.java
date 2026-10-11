@@ -236,8 +236,13 @@ public final class CarryRuntime {
             String shipId = entry.getKey().substring(prefix.length());
             ServerSubLevel ship = findShip(container, shipId);
             AbstractContraptionEntity contraption = lock.contraption();
-            if (ship == null || contraption == null || contraption.isRemoved()) {
+            // A piston outside entity-ticking range is removed from the level while its block
+            // entity keeps writing the anchor. The stored reference still has that pose.
+            if (ship == null) {
                 drop.add(entry.getKey());
+                continue;
+            }
+            if (contraption == null) {
                 continue;
             }
             net.minecraft.world.phys.Vec3 anchor = contraption.getAnchorVec();
@@ -277,14 +282,15 @@ public final class CarryRuntime {
             ship.updateBoundingBox();
             if (PLACEMENT_LOGGED.add(shipId) || (Math.abs(dy) > 1.0 && PLACEMENT_LOGGED.add(shipId + ":far"))) {
                 SableSafeLanding.LOGGER.info(
-                        "LIVE deck {} y {} -> {} dy={} dx={} dz={} anchorY={}",
+                        "LIVE deck {} y {} -> {} dy={} dx={} dz={} anchorY={} removed={}",
                         shipId,
                         fmt(from.y()),
                         fmt(target.y()),
                         fmt(dy),
                         fmt(dx),
                         fmt(dz),
-                        fmt(anchor.y)
+                        fmt(anchor.y),
+                        contraption.isRemoved()
                 );
             }
         }
