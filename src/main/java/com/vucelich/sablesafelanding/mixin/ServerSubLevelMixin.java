@@ -3,6 +3,7 @@ package com.vucelich.sablesafelanding.mixin;
 import com.vucelich.sablesafelanding.SableSafeLanding;
 import com.vucelich.sablesafelanding.VoidRescueRuntime;
 import com.vucelich.sablesafelanding.sim.FailureGuards;
+import com.vucelich.sablesafelanding.sim.RateLimiter;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
@@ -19,7 +20,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(value = ServerSubLevel.class, remap = false)
 public abstract class ServerSubLevelMixin {
-    private static boolean loggedFailure;
+    private static final RateLimiter HOOK_LOGS = new RateLimiter(5_000_000_000L);
 
     /**
      * Sable 2.0.3's {@code ServerSubLevel.tick} invokes {@code ServerSubLevel.updateBoundingBox()V}
@@ -57,8 +58,7 @@ public abstract class ServerSubLevelMixin {
 
     private void rescue(CallbackInfo ci) {
         if (!FailureGuards.run(this::rescueNow)) {
-            if (!loggedFailure) {
-                loggedFailure = true;
+            if (HOOK_LOGS.tryAcquire(System.nanoTime())) {
                 SableSafeLanding.LOGGER.warn("Removal hook failed; leaving Sable's deletion check alone");
             }
         }

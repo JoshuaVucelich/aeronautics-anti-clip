@@ -51,6 +51,8 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - `docs/FAILURE_SCENARIOS.md` records the elevator fall, a frozen-grabber deletion, and the surrounding cases.
 - Carry releases on chunk unload without teleporting, refuses a one-tick step past 4 blocks or 90 degrees, and skips the ride velocity when a physics substep is longer than 0.25 seconds. A car on a carried ship is translated with that ship. New captures examine at most 32 ships a tick and stop at 32 locks.
 - Rescue is not applied inside a portal, is not taken from another dimension, and walks a buried target up to clear air or skips it. Rescue velocity is zero. A disassembled deck clears only a non-finite or absurd speed.
-- `enabled` is the master switch. `/anticlip status`, `/anticlip off`, and `/anticlip on` read and save it. Mixin configs are optional (`require = 0`) and hook bodies swallow a thrown callback.
+- `enabled` is the master switch. `/anticlip status`, `/anticlip off`, and `/anticlip on` read and save it. Mixin configs are optional (`require = 0`) and hook bodies swallow a thrown callback. Those warnings are rate-limited.
+- A bearing step is the wrapped angle, so a continuous turn through 360 degrees stays inside the spike cap. Passengers rotate with that step. A ship whose center is outside the hull is not a passenger.
+- `/anticlip off` clears `sable$initialized` so Sable adds its kinematic collider again. Rescue refuses a cell that contains liquid, scans every block of the ship for a portal, and the clamp query is world blocks only.
 - Repro: `FailureScenarioTest`.
-- Version `0.6.0-rc.25` jar. Still not published to Modrinth or CurseForge.
+- Version `0.6.0-rc.26` jar. Still not published to Modrinth or CurseForge.

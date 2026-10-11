@@ -45,6 +45,7 @@ public final class VoidRescueRuntime {
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static final RateLimiter PORTAL_LOGS = new RateLimiter(5_000_000_000L);
     private static final RateLimiter BURIED_LOGS = new RateLimiter(5_000_000_000L);
+    private static final RateLimiter CLAMP_LOGS = new RateLimiter(1_000_000_000L);
     private static boolean removalHookSeen;
     private static boolean loggedThread;
     private static int ticksWithShipsBeforeHook;
@@ -332,10 +333,13 @@ public final class VoidRescueRuntime {
      * @return the pose to apply, or null when every nearby cell is solid
      */
     private static BodyState acceptRescue(ServerLevel level, BodyState restored) {
+        boolean worldBlocked = worldBlocked(level, restored.bounds());
+        boolean liquid = liquid(level, restored.bounds());
         Vec3 shift = RescueSite.firstClear(
                 RescueSite.offsets(),
                 offset -> occupied(level, restored.bounds().translate(offset))
         );
+        logClamp(restored.id(), shift, worldBlocked, liquid);
         if (shift == null) {
             logBuried(restored.id());
             return null;
@@ -364,11 +368,7 @@ public final class VoidRescueRuntime {
         int maxX = (int) Math.floor(box.maxX());
         int maxY = (int) Math.floor(box.maxY());
         int maxZ = (int) Math.floor(box.maxZ());
-        int scanned = 0;
         for (BlockPos pos : BlockPos.betweenClosed(minX, minY, minZ, maxX, maxY, maxZ)) {
-            if (scanned++ >= 48) {
-                return false;
-            }
             BlockState state = level.getBlockState(pos);
             if (state.is(Blocks.NETHER_PORTAL) || state.is(Blocks.END_PORTAL) || state.is(Blocks.END_GATEWAY)) {
                 return true;
@@ -383,11 +383,55 @@ public final class VoidRescueRuntime {
                 return true;
             }
             AABB aabb = new AABB(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+            // World blocks and liquids only. The ship's own plot is not an entity and is not in this query.
+            return level.containsAnyLiquid(aabb) || !level.noCollision(null, aabb);
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+            return true;
+        }
+    }
+
+    /** World blocks at the clamped cell. Sub-level blocks are not part of this query. */
+    private static boolean worldBlocked(ServerLevel level, Aabb box) {
+        try {
+            if (box == null || !box.finite()) {
+                return true;
+            }
+            AABB aabb = new AABB(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
             return !level.noCollision(null, aabb);
         } catch (RuntimeException ex) {
             logFailure(ex);
             return true;
         }
+    }
+
+    private static boolean liquid(ServerLevel level, Aabb box) {
+        try {
+            if (box == null || !box.finite()) {
+                return true;
+            }
+            AABB aabb = new AABB(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+            return level.containsAnyLiquid(aabb);
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+            return true;
+        }
+    }
+
+    private static void logClamp(String id, Vec3 shift, boolean worldBlocked, boolean liquid) {
+        if (!CLAMP_LOGS.tryAcquire(System.nanoTime())) {
+            return;
+        }
+        String shiftText = shift == null
+                ? "none"
+                : String.format(java.util.Locale.ROOT, "%.2f,%.2f,%.2f", shift.x(), shift.y(), shift.z());
+        SableSafeLanding.LOGGER.info(
+                "LIVE rescue clamp ship {} shift={} worldBlocked={} liquid={}",
+                id,
+                shiftText,
+                worldBlocked,
+                liquid
+        );
     }
 
     private static void logPortal(UUID id) {

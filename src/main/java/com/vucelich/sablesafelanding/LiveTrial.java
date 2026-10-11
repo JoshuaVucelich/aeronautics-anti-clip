@@ -65,7 +65,7 @@ public final class LiveTrial {
     }
 
     private enum Tail {
-        NONE, DRIVE, DROP, FLY, YAW, PILOT
+        NONE, DRIVE, DROP, FLY, YAW, PILOT, DISARM
     }
 
     private record Scene(String name, Kind kind, boolean feed, boolean carry, int direction, int moveTicks, Tail tail, double seatLift) {
@@ -83,7 +83,8 @@ public final class LiveTrial {
             new Scene("elevator-stop", Kind.ELEVATOR, true, true, -1, 48, Tail.DRIVE, 0.0),
             new Scene("elevator-drop", Kind.ELEVATOR, true, true, -1, 16, Tail.DROP, 0.0),
             new Scene("flyover", Kind.ELEVATOR, true, true, -1, 32, Tail.FLY, 0.7),
-            new Scene("pilot-takeoff", Kind.ELEVATOR, true, true, 1, 36, Tail.PILOT, 0.0)
+            new Scene("pilot-takeoff", Kind.ELEVATOR, true, true, 1, 36, Tail.PILOT, 0.0),
+            new Scene("disarm-collide", Kind.ELEVATOR, true, false, 1, 48, Tail.DISARM, 0.0)
     };
 
     private static final GameProfile PILOT_PROFILE = new GameProfile(
@@ -156,6 +157,7 @@ public final class LiveTrial {
 
     private static void warmup(ServerLevel level) {
         if (surface == Integer.MIN_VALUE) {
+            SafeLandingConfig.ENABLED.set(true);
             for (int cx = -1; cx <= 16; cx++) {
                 for (int cz = -1; cz <= 2; cz++) {
                     level.setChunkForced(cx, cz, true);
@@ -273,6 +275,16 @@ public final class LiveTrial {
                 markerX = ship.logicalPose().position().x();
                 shiftShip(level, ship, 3.0, 0.0, 0.0);
                 log("{} shoved x={} held={}", scene.name, fmt(ship.logicalPose().position().x()), held(ship));
+            }
+            if (scene.tail == Tail.DISARM && step == 10) {
+                disarmFeed(level, scene);
+            }
+            if (scene.tail == Tail.DISARM && step == 16 && contraption != null) {
+                log("{} sable back tracked={} sableInitialized={} claimed={}",
+                        scene.name,
+                        ColliderFeedRuntime.tracked(level).size(),
+                        ColliderFeedRuntime.sableInitialized(contraption),
+                        ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()));
             }
             if (scene.tail == Tail.PILOT && phaseTick >= reportAt && ship != null && !ship.isRemoved()) {
                 if (phaseTick == reportAt) {
@@ -526,6 +538,30 @@ public final class LiveTrial {
         if (scene.tail == Tail.DROP) {
             log("{} drop held={} contraptionAlive={}", scene.name, held, contraption != null && contraption.isAlive());
         }
+        if (scene.tail == Tail.DISARM && contraption != null && contraption.level() instanceof ServerLevel serverLevel) {
+            log("{} after off tracked={} sableInitialized={} claimed={}",
+                    scene.name,
+                    ColliderFeedRuntime.tracked(serverLevel).size(),
+                    ColliderFeedRuntime.sableInitialized(contraption),
+                    ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()));
+        }
+    }
+
+    /** Turns the master switch off after the feed has claimed the elevator, so Sable's collider is what pushes. */
+    private static void disarmFeed(ServerLevel level, Scene scene) {
+        try {
+            level.getServer().getCommands().performPrefixedCommand(
+                    level.getServer().createCommandSourceStack(),
+                    "anticlip off"
+            );
+        } catch (RuntimeException ex) {
+            log("{} anticlip off failed {}", scene.name, ex.toString());
+        }
+        log("{} disarmed tracked={} sableInitialized={} claimed={}",
+                scene.name,
+                ColliderFeedRuntime.tracked(level).size(),
+                contraption == null ? "none" : ColliderFeedRuntime.sableInitialized(contraption),
+                contraption != null && ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()));
     }
 
     private static boolean held(ServerSubLevel subLevel) {
@@ -974,6 +1010,12 @@ public final class LiveTrial {
 
     private static void finish(MinecraftServer server) {
         phase = Phase.DONE;
+        try {
+            SafeLandingConfig.ENABLED.set(true);
+            SafeLandingConfig.ENABLED.save();
+        } catch (RuntimeException ex) {
+            SableSafeLanding.LOGGER.warn("LIVE could not restore the master switch", ex);
+        }
         log("stopping");
         server.halt(false);
     }

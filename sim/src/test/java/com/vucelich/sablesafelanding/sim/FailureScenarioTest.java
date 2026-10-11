@@ -92,9 +92,11 @@ class FailureScenarioTest {
         Aabb car = new Aabb(2.0, 14.0, 1.0, 4.0, 15.2, 3.0);
         Aabb sibling = new Aabb(20.0, 14.0, 1.0, 22.0, 15.2, 3.0);
         Aabb below = new Aabb(2.0, 4.0, 1.0, 4.0, 6.0, 3.0);
+        Aabb adjacent = new Aabb(8.0, 10.0, 0.0, 10.0, 14.0, 4.0);
         assertTrue(NestedCarry.passenger(ship, car));
         assertFalse(NestedCarry.passenger(ship, sibling));
         assertFalse(NestedCarry.passenger(ship, below));
+        assertFalse(NestedCarry.passenger(ship, adjacent));
 
         Map<String, Aabb> others = new LinkedHashMap<>();
         others.put("ship", ship);
@@ -103,6 +105,49 @@ class FailureScenarioTest {
         others.put("locked", new Aabb(1.0, 14.0, 1.0, 2.0, 15.0, 2.0));
         List<String> passengers = NestedCarry.passengers(ship, others, "ship", Set.of("locked"));
         assertEquals(List.of("car"), passengers);
+
+        Vec3 axis = new Vec3(0.0, 1.0, 0.0);
+        Vec3 pivot = new Vec3(4.0, 12.0, 2.0);
+        Vec3 child = new Vec3(6.0, 14.5, 2.0);
+        Vec3 turnedChild = NestedCarry.place(child, pivot, pivot, axis, Math.PI / 2.0);
+        assertEquals(4.0, turnedChild.x(), 1.0e-9);
+        assertEquals(14.5, turnedChild.y(), 1.0e-9);
+        assertEquals(0.0, turnedChild.z(), 1.0e-9);
+        assertEquals(Math.PI / 2.0, Rot.IDENTITY.turned(axis, Math.PI / 2.0).yaw(), 1.0e-9);
+    }
+
+    @Test
+    void aBearingThatTurnsThroughSeveralRevolutionsDoesNotSpikeOnTheWrap() {
+        double rawWrap = Math.toRadians(10.0 - 350.0);
+        assertFalse(CarryGate.safeStep(0.0, rawWrap));
+        double wrapped = CarryGate.wrapRadians(rawWrap);
+        assertTrue(CarryGate.safeStep(0.0, wrapped));
+        assertEquals(20.0, Math.toDegrees(wrapped), 0.05);
+
+        Vec3 pivot = new Vec3(0.5, 64.5, 0.5);
+        Vec3 axis = new Vec3(0.0, 1.0, 0.0);
+        Vec3 ship = new Vec3(2.5, 65.0, 0.5);
+        double radius = ship.sub(pivot).length();
+        Vec3 local = DeckFollow.localOffset(ship, pivot, axis, 0.0);
+        double placed = 0.0;
+        Vec3 at = ship;
+        for (int revolution = 0; revolution < 3; revolution++) {
+            for (int deg = 0; deg < 360; deg += 10) {
+                double next = Math.toRadians((deg + 10) % 360);
+                double raw = next - placed;
+                double step = CarryGate.wrapRadians(raw);
+                if (deg == 350) {
+                    assertFalse(CarryGate.safeStep(0.05, raw));
+                }
+                assertTrue(CarryGate.safeStep(0.05, step));
+                assertEquals(10.0, Math.toDegrees(step), 0.05);
+                at = DeckFollow.worldTarget(local, pivot, axis, next);
+                assertEquals(radius, at.sub(pivot).length(), 1.0e-6);
+                assertEquals(ship.y(), at.y(), 1.0e-9);
+                placed = next;
+            }
+        }
+        assertEquals(radius, at.sub(pivot).length(), 1.0e-6);
     }
 
     @Test

@@ -5,6 +5,7 @@ import com.vucelich.sablesafelanding.ColliderFeedRuntime;
 import com.vucelich.sablesafelanding.SableSafeLanding;
 import com.vucelich.sablesafelanding.SafeLandingConfig;
 import com.vucelich.sablesafelanding.sim.FailureGuards;
+import com.vucelich.sablesafelanding.sim.RateLimiter;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -28,7 +29,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(value = AbstractContraptionEntity.class, priority = 1100, remap = false)
 public abstract class ContraptionInitializeMixin {
-    private static boolean loggedFailure;
+    private static final RateLimiter HOOK_LOGS = new RateLimiter(5_000_000_000L);
 
     @Inject(
             method = "tick",
@@ -77,10 +78,9 @@ public abstract class ContraptionInitializeMixin {
     }
 
     private static void logHookFailure() {
-        if (loggedFailure) {
+        if (!HOOK_LOGS.tryAcquire(System.nanoTime())) {
             return;
         }
-        loggedFailure = true;
         SableSafeLanding.LOGGER.warn("Contraption hook failed; leaving Sable's collider path alone");
     }
 }

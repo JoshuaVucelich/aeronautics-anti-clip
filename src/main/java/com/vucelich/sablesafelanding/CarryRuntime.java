@@ -630,7 +630,8 @@ public final class CarryRuntime {
         double dy = target.y() - from.y();
         double dz = target.z() - from.z();
         double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        double angleStep = angle - lock.lastPlacedAngle;
+        // Same wrap as the ride sample and FedContraptionCollider. A 360-degree bearing wrap is one step.
+        double angleStep = Math.toRadians(Mth.wrapDegrees(Math.toDegrees(angle - lock.lastPlacedAngle)));
         if (!CarryGate.teleport(dx * dx + dy * dy + dz * dz, angleStep)) {
             return true;
         }
@@ -1238,18 +1239,19 @@ public final class CarryRuntime {
             }
             Vector3dc position = child.logicalPose().position();
             Vec3 childPos = new Vec3(position.x(), position.y(), position.z());
-            Vec3 childTarget = childPos.sub(oldPivot).rotate(lock.axis, angleStep).add(pivot);
+            Vec3 childTarget = NestedCarry.place(childPos, oldPivot, pivot, lock.axis, angleStep);
             if (!childTarget.finite() || !CarryGate.safeStep(childPos.sub(childTarget).length(), angleStep)) {
                 continue;
             }
-            shiftBody(level, child, childTarget);
+            Quaterniondc orientation = child.logicalPose().orientation();
+            Rot turned = new Rot(orientation.x(), orientation.y(), orientation.z(), orientation.w()).turned(lock.axis, angleStep);
+            shiftBody(level, child, childTarget, turned);
             moved++;
         }
     }
 
-    private static void shiftBody(ServerLevel level, ServerSubLevel child, Vec3 target) {
-        Quaterniondc orientation = child.logicalPose().orientation();
-        Quaterniond copy = new Quaterniond(orientation);
+    private static void shiftBody(ServerLevel level, ServerSubLevel child, Vec3 target, Rot turned) {
+        Quaterniond copy = new Quaterniond(turned.x(), turned.y(), turned.z(), turned.w());
         Vector3d position = new Vector3d(target.x(), target.y(), target.z());
         PhysicsPipeline pipeline = pipeline(level);
         if (pipeline != null) {
@@ -1257,6 +1259,7 @@ public final class CarryRuntime {
             pipeline.teleport(child, position, copy);
         } else {
             child.logicalPose().position().set(position);
+            child.logicalPose().orientation().set(copy);
         }
         child.updateLastPose();
         child.updateBoundingBox();

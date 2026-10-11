@@ -19,15 +19,12 @@ public final class NestedCarry {
     }
 
     /**
-     * The child sits in or on the parent. A sibling a few blocks away does not.
-     * A box that merely clips a corner from below the hull does not.
+     * The child sits in or on the parent. The center has to be inside the parent's
+     * footprint, so a ship touching the hull from the side is not dragged along.
+     * A box below the hull is not a passenger either.
      */
     public static boolean passenger(Aabb parent, Aabb child) {
         if (parent == null || child == null || !parent.finite() || !child.finite()) {
-            return false;
-        }
-        Aabb near = parent.expand(PAD);
-        if (!near.intersects(child)) {
             return false;
         }
         if (child.minY() < parent.minY() - PAD) {
@@ -37,8 +34,16 @@ public final class NestedCarry {
             return false;
         }
         Vec3 center = child.center();
-        return center.x() >= near.minX() && center.x() < near.maxX()
-                && center.z() >= near.minZ() && center.z() < near.maxZ();
+        return center.x() >= parent.minX() && center.x() < parent.maxX()
+                && center.z() >= parent.minZ() && center.z() < parent.maxZ();
+    }
+
+    /** Child position after the parent's pivot motion. The bearing step rotates around the old pivot. */
+    public static Vec3 place(Vec3 child, Vec3 oldPivot, Vec3 newPivot, Vec3 axis, double angleStep) {
+        if (child == null || oldPivot == null || newPivot == null || axis == null) {
+            return child;
+        }
+        return child.sub(oldPivot).rotate(axis, angleStep).add(newPivot);
     }
 
     public static List<String> passengers(Aabb parent, Map<String, Aabb> others, String parentId, Set<String> locked) {

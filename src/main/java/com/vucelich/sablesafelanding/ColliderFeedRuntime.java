@@ -15,6 +15,7 @@ import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -182,17 +183,73 @@ public final class ColliderFeedRuntime {
             for (Map.Entry<String, FedContraptionCollider> entry : fed.entrySet()) {
                 CLAIMED.remove(entry.getKey());
                 HOOKED.remove(entry.getKey());
-                if (pipeline != null && entry.getValue() != null) {
+                FedContraptionCollider collider = entry.getValue();
+                if (pipeline != null && collider != null) {
                     try {
-                        pipeline.remove(entry.getValue());
+                        pipeline.remove(collider);
                     } catch (RuntimeException ex) {
                         logFailure(ex);
                     }
+                }
+                if (collider != null) {
+                    restoreSable(collider.entity());
                 }
             }
         } catch (RuntimeException ex) {
             logFailure(ex);
         }
+    }
+
+    /**
+     * Sable 2.0.3 adds its kinematic from {@code sable$contraptionInitialize} only while
+     * {@code sable$initialized} is false. Claiming removes that body. Clearing the flag lets the
+     * next contraption tick add it again. This mod does not displace it while the master switch is off.
+     */
+    public static void restoreSable(AbstractContraptionEntity entity) {
+        if (entity == null) {
+            return;
+        }
+        try {
+            Field field = initializedField(entity.getClass());
+            if (field == null) {
+                SableSafeLanding.LOGGER.warn("LIVE restore sable collider {} missing init flag", entity.getUUID());
+                return;
+            }
+            field.setAccessible(true);
+            field.setBoolean(entity, false);
+            SableSafeLanding.LOGGER.info("LIVE restore sable collider {} initialized=false", entity.getUUID());
+        } catch (ReflectiveOperationException ex) {
+            logFailure(new IllegalStateException(ex));
+        }
+    }
+
+    /** Null when the mixin field is absent. True after Sable's next initialize. */
+    public static Boolean sableInitialized(AbstractContraptionEntity entity) {
+        if (entity == null) {
+            return null;
+        }
+        try {
+            Field field = initializedField(entity.getClass());
+            if (field == null) {
+                return null;
+            }
+            field.setAccessible(true);
+            return field.getBoolean(entity);
+        } catch (ReflectiveOperationException ex) {
+            return null;
+        }
+    }
+
+    private static Field initializedField(Class<?> type) {
+        Class<?> cursor = type;
+        while (cursor != null) {
+            try {
+                return cursor.getDeclaredField("sable$initialized");
+            } catch (NoSuchFieldException ex) {
+                cursor = cursor.getSuperclass();
+            }
+        }
+        return null;
     }
 
     /** Forgets every claim so a killed switch cannot keep suppressing Sable. */
