@@ -5,6 +5,8 @@ package com.vucelich.sablesafelanding.sim;
  * The collider feed never captures. Capture needs {@link #CONTACT_HOLD} ticks of real block
  * contact while carry is on. A teleport happens only after the deck has drifted past
  * {@link #DRIFT} blocks or {@link #ANGLE_DRIFT} radians, so a parked hull can sleep.
+ * The angle step is half a degree so a turning bearing updates every server tick and
+ * Sable's client snapshot interpolation can follow it.
  */
 public final class CarryGate {
     public static final int CONTACT_HOLD = 5;
@@ -18,8 +20,12 @@ public final class CarryGate {
     public static final int TAKEOFF_TICKS = 3;
     /** Blocks of deck drift before another teleport. */
     public static final double DRIFT = 0.2;
-    /** Radians of bearing drift before another teleport. Eight degrees. */
-    public static final double ANGLE_DRIFT = Math.toRadians(8.0);
+    /**
+     * Radians of bearing drift before another teleport. Half a degree.
+     * Larger steps show up on the client as a stair, because Sable interpolates the
+     * snapshots it is sent and does not invent the in-between angle.
+     */
+    public static final double ANGLE_DRIFT = Math.toRadians(0.5);
     /** Anchor motion, in blocks, that still counts as a stopped deck. */
     public static final double IDLE_ANCHOR = 1.0e-3;
     /** Angle motion, in radians, that still counts as a stopped deck. About 0.05 degrees. */

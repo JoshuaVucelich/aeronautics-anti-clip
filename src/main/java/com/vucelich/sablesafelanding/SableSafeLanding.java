@@ -18,6 +18,7 @@ public final class SableSafeLanding {
 
     public SableSafeLanding(IEventBus modBus, ModContainer container) {
         container.registerConfig(ModConfig.Type.COMMON, SafeLandingConfig.SPEC);
+        modBus.addListener(SafeLandingConfig::onLoad);
         NeoForge.EVENT_BUS.addListener(VoidRescueRuntime::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(ColliderFeedRuntime::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(CarryRuntime::onPrePhysics);

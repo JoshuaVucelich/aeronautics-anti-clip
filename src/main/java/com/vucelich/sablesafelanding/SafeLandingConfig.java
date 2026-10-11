@@ -1,10 +1,12 @@
 package com.vucelich.sablesafelanding;
 
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
+import com.vucelich.sablesafelanding.sim.ConfigMigration;
+import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.6.0-rc.23";
+    public static final String VERSION = "0.6.0-rc.24";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -19,6 +21,7 @@ public final class SafeLandingConfig {
     public static final ModConfigSpec.BooleanValue BEDROCK_RESCUE;
     public static final ModConfigSpec.DoubleValue BEDROCK_MARGIN;
     public static final ModConfigSpec.IntValue BEDROCK_TICKS;
+    public static final ModConfigSpec.IntValue CONFIG_VERSION;
 
     static {
         AntiClipConfig defaults = AntiClipConfig.defaults();
@@ -61,8 +64,33 @@ public final class SafeLandingConfig {
         BEDROCK_TICKS = builder
                 .comment("Consecutive ticks the sub-level must stay below that line before it is restored.")
                 .defineInRange("bedrockTicks", defaults.bedrockTicks(), 1, 20_000);
+        CONFIG_VERSION = builder
+                .comment("Internal. 0 means this file was written before carry defaulted on. Loading migrates that file to carry=true and stores 1. A later edit that turns carry off is kept.")
+                .defineInRange("configVersion", 0, 0, 1_000);
 
         SPEC = builder.build();
+    }
+
+    /**
+     * NeoForge does not replace a value that is already in the file, so an older config keeps
+     * {@code carry=false}. A missing {@code configVersion} loads as 0 and is migrated once.
+     */
+    public static void onLoad(ModConfigEvent event) {
+        if (event.getConfig().getSpec() != SPEC) {
+            return;
+        }
+        if (!(event instanceof ModConfigEvent.Loading) && !(event instanceof ModConfigEvent.Reloading)) {
+            return;
+        }
+        int previous = CONFIG_VERSION.getAsInt();
+        ConfigMigration.Result result = ConfigMigration.migrate(previous, CARRY.getAsBoolean());
+        if (!result.changed()) {
+            return;
+        }
+        CARRY.set(result.carry());
+        CONFIG_VERSION.set(result.version());
+        CONFIG_VERSION.save();
+        SableSafeLanding.LOGGER.info("Migrated configVersion {} to {} and set carry=true", previous, result.version());
     }
 
     private SafeLandingConfig() {
