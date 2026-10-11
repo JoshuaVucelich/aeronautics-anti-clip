@@ -41,4 +41,4 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 
 - Spatial hash, merged support boxes, NaN rejection, per-feature kill switches, and a rate-limited failure path.
 - Repro: `HardeningTest`.
-- Version `0.6.0-rc.2` jar. Still not published to Modrinth or CurseForge.
+- Version `0.6.0-rc.3` jar. Still not published to Modrinth or CurseForge.

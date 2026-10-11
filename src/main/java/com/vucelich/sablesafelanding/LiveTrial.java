@@ -2,7 +2,9 @@ package com.vucelich.sablesafelanding;
 
 import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.ControlledContraptionEntity;
+import com.simibubi.create.content.contraptions.bearing.BearingBlock;
 import com.simibubi.create.content.contraptions.bearing.MechanicalBearingBlockEntity;
+import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.content.contraptions.piston.LinearActuatorBlockEntity;
 import dev.ryanhcode.sable.SableConfig;
 import dev.ryanhcode.sable.api.SubLevelAssemblyHelper;
@@ -23,6 +25,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DirectionProperty;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -30,6 +33,7 @@ import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.joml.Quaterniond;
 import org.joml.Vector3d;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -303,12 +307,16 @@ public final class LiveTrial {
         }
         road(level, base.offset(-6, 1, 0), base.offset(-2, 1, 0));
         BlockEntity pulley = level.getBlockEntity(pulleyPos);
+        if (pulley instanceof KineticBlockEntity kinetic) {
+            kinetic.setSpeed(32.0f);
+        }
         if (pulley != null) {
             try {
                 invoke(pulley, "assemble");
             } catch (ReflectiveOperationException ex) {
-                log("elevator assemble failed {}", ex.toString());
+                log("elevator assemble failed {}", causeText(ex));
             }
+            log("elevator state {} speed {}", level.getBlockState(pulleyPos), pulley instanceof KineticBlockEntity kinetic ? kinetic.getSpeed() : 0.0f);
         }
         return pulley;
     }
@@ -321,8 +329,12 @@ public final class LiveTrial {
                 level.setBlockAndUpdate(deck.offset(x, 0, z), Blocks.OAK_PLANKS.defaultBlockState());
             }
         }
+        log("bearing state {} front {}", level.getBlockState(base), level.getBlockState(base.above()));
         if (level.getBlockEntity(base) instanceof MechanicalBearingBlockEntity bearing) {
             bearing.assemble();
+            if (bearing.getLastAssemblyException() != null) {
+                log("bearing exception {}", bearing.getLastAssemblyException().toString());
+            }
             return bearing;
         }
         return level.getBlockEntity(base);
@@ -337,12 +349,16 @@ public final class LiveTrial {
                 level.setBlockAndUpdate(deck.offset(x, 0, z), Blocks.OAK_PLANKS.defaultBlockState());
             }
         }
+        log("piston state {} pole {}", level.getBlockState(base), level.getBlockState(base.above()));
         BlockEntity be = level.getBlockEntity(base);
+        if (be instanceof KineticBlockEntity kinetic) {
+            kinetic.setSpeed(32.0f);
+        }
         if (be != null) {
             try {
                 invoke(be, "assemble");
             } catch (ReflectiveOperationException ex) {
-                log("piston assemble failed {}", ex.toString());
+                log("piston assemble failed {}", causeText(ex));
             }
         }
         return be;
@@ -423,13 +439,32 @@ public final class LiveTrial {
             log("missing block {}", id);
             return;
         }
-        BlockState state = block.defaultBlockState();
+        BlockState state = withFacing(block.defaultBlockState(), facing);
+        level.setBlockAndUpdate(pos, state);
+    }
+
+    private static BlockState withFacing(BlockState state, Direction facing) {
+        if (state.hasProperty(BearingBlock.FACING) && BearingBlock.FACING.getPossibleValues().contains(facing)) {
+            state = state.setValue(BearingBlock.FACING, facing);
+        }
+        if (state.hasProperty(BlockStateProperties.FACING) && BlockStateProperties.FACING.getPossibleValues().contains(facing)) {
+            state = state.setValue(BlockStateProperties.FACING, facing);
+        }
+        if (state.hasProperty(BlockStateProperties.HORIZONTAL_FACING) && facing.getAxis().isHorizontal()
+                && BlockStateProperties.HORIZONTAL_FACING.getPossibleValues().contains(facing)) {
+            state = state.setValue(BlockStateProperties.HORIZONTAL_FACING, facing);
+        }
         for (Property<?> property : state.getProperties()) {
             if (property instanceof DirectionProperty directions && property.getName().equals("facing") && directions.getPossibleValues().contains(facing)) {
                 state = state.setValue(directions, facing);
             }
         }
-        level.setBlockAndUpdate(pos, state);
+        return state;
+    }
+
+    private static String causeText(ReflectiveOperationException ex) {
+        Throwable cause = ex instanceof InvocationTargetException target && target.getCause() != null ? target.getCause() : ex;
+        return cause.toString();
     }
 
     private static void road(ServerLevel level, BlockPos from, BlockPos to) {
