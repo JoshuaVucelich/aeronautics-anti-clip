@@ -26,6 +26,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.joml.Quaterniond;
+import org.joml.Quaterniondc;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
 
@@ -57,9 +58,19 @@ public final class CarryRuntime {
 
     /**
      * Offset of the ship origin in the deck frame, captured while the ship was on the platform.
-     * The capture angle is already applied, so a later absolute angle only adds the turn since then.
+     * The contraption is kept by reference: a piston moving outside the entity-ticking distance
+     * drops out of the level lookup while its block entity is still moving it.
+     * Orientation is the pose from boarding, so a contact shove cannot tip the car into the deck.
      */
-    private record DeckLock(String contraptionId, Vec3 local, Vec3 axis) {
+    private record DeckLock(
+            AbstractContraptionEntity contraption,
+            Vec3 local,
+            Vec3 axis,
+            double orientationX,
+            double orientationY,
+            double orientationZ,
+            double orientationW
+    ) {
     }
 
     private record Sample(
@@ -187,12 +198,25 @@ public final class CarryRuntime {
             if (!moving) {
                 continue;
             }
-            double angle = Math.toRadians(deckAngle(level, support.id()));
+            AbstractContraptionEntity contraption = findContraption(level, support.id());
+            if (contraption == null) {
+                continue;
+            }
+            double angle = Math.toRadians(deckAngle(contraption));
             Vec3 local = DeckFollow.localOffset(body.position(), support.pivot(), support.axis(), angle);
             if (!local.finite()) {
                 continue;
             }
-            LOCKS.put(key, new DeckLock(support.id(), local, support.axis()));
+            Quaterniondc boarded = ship.logicalPose().orientation();
+            LOCKS.put(key, new DeckLock(
+                    contraption,
+                    local,
+                    support.axis(),
+                    boarded.x(),
+                    boarded.y(),
+                    boarded.z(),
+                    boarded.w()
+            ));
         }
     }
 
@@ -211,16 +235,9 @@ public final class CarryRuntime {
             DeckLock lock = entry.getValue();
             String shipId = entry.getKey().substring(prefix.length());
             ServerSubLevel ship = findShip(container, shipId);
-            AbstractContraptionEntity contraption = findContraption(level, lock.contraptionId);
-            if (ship == null || contraption == null) {
-                if (PLACEMENT_LOGGED.add(shipId + ":miss")) {
-                    SableSafeLanding.LOGGER.info(
-                            "LIVE deck miss ship={} foundShip={} contraption={}",
-                            shipId,
-                            ship != null,
-                            lock.contraptionId
-                    );
-                }
+            AbstractContraptionEntity contraption = lock.contraption();
+            if (ship == null || contraption == null || contraption.isRemoved()) {
+                drop.add(entry.getKey());
                 continue;
             }
             net.minecraft.world.phys.Vec3 anchor = contraption.getAnchorVec();
@@ -246,7 +263,7 @@ public final class CarryRuntime {
             if (dx * dx + dy * dy + dz * dz < 1.0e-8) {
                 continue;
             }
-            Quaterniond orientation = new Quaterniond(ship.logicalPose().orientation());
+            Quaterniond orientation = new Quaterniond(lock.orientationX(), lock.orientationY(), lock.orientationZ(), lock.orientationW());
             Vector3d position = new Vector3d(target.x(), target.y(), target.z());
             if (pipeline != null) {
                 pipeline.wakeUp(ship);
@@ -298,14 +315,6 @@ public final class CarryRuntime {
             }
         }
         return null;
-    }
-
-    private static float deckAngle(ServerLevel level, String id) {
-        AbstractContraptionEntity contraption = findContraption(level, id);
-        if (contraption != null) {
-            return deckAngle(contraption);
-        }
-        return 0.0f;
     }
 
     private static float deckAngle(AbstractContraptionEntity entity) {
