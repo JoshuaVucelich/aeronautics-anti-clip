@@ -8,6 +8,7 @@ import com.vucelich.sablesafelanding.sim.AabbMerger;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import com.vucelich.sablesafelanding.sim.AntiClipStep;
 import com.vucelich.sablesafelanding.sim.CarryGate;
+import com.vucelich.sablesafelanding.sim.DeckContact;
 import com.vucelich.sablesafelanding.sim.DeckFollow;
 import com.vucelich.sablesafelanding.sim.RateLimiter;
 import com.vucelich.sablesafelanding.sim.Rot;
@@ -64,10 +65,12 @@ import java.util.UUID;
  * center-of-mass teleport is copied onto that parked pose and is not a wake. Sable 2.0.3
  * {@code RapierPhysicsPipeline.teleport} writes the Rapier body, then the logical pose, and
  * returns without {@code wakeUp}. This listener calls {@code PhysicsPipeline.teleport} from
- * {@code ServerTickEvent.Post} only, and does not call {@code wakeUp} or {@code resetVelocity}
- * afterwards. A following wake would unpark the hull and jitter the car. The ship-hull mixin
- * source was not in this workspace; the Sable method order was read from that class, and the
- * "teleport is not a wake" rule from ship-hull 1.0.0-phase7.
+ * {@code ServerTickEvent.Post} only when the deck has drifted, and does not call
+ * {@code resetVelocity}. A sleeping body keeps the pre-teleport pose, so the next read looks
+ * like a launch; the drift correction wakes that one body first. Ticks that do not teleport
+ * do not wake, so a parked deck can still sleep. The ship-hull mixin source was not in this
+ * workspace; the Sable method order was read from that class, and the "teleport is not a wake"
+ * rule from ship-hull 1.0.0-phase7.
  */
 public final class CarryRuntime {
     private static final net.minecraft.world.phys.Vec3 ROTATION_OFFSET = new net.minecraft.world.phys.Vec3(0.5, 0.5, 0.5);
@@ -104,6 +107,7 @@ public final class CarryRuntime {
         private int idleTicks;
         private int missTicks;
         private int contactTicks;
+        private int takeoffTicks;
         private boolean confirmed;
 
         private DeckLock(
@@ -288,12 +292,25 @@ public final class CarryRuntime {
             }
             CarryGate.Reason reason = releaseReason(level, lock, ship, supports);
             if (reason != null) {
-                SableSafeLanding.LOGGER.info(
-                        "LIVE deck release ship {} reason={}",
-                        shipId,
-                        CarryGate.reasonName(reason)
-                );
+                if (reason == CarryGate.Reason.TAKEOFF) {
+                    Vector3dc velocity = ship.latestLinearVelocity;
+                    SableSafeLanding.LOGGER.info(
+                            "LIVE deck release ship {} reason=takeoff vy={}",
+                            shipId,
+                            fmt(velocity == null ? 0.0 : velocity.y())
+                    );
+                } else {
+                    SableSafeLanding.LOGGER.info(
+                            "LIVE deck release ship {} reason={}",
+                            shipId,
+                            CarryGate.reasonName(reason)
+                    );
+                }
                 drop.add(entry.getKey());
+                continue;
+            }
+            // A climb that has left the deck has to keep its velocity. Pulling it back is the glue.
+            if (lock.takeoffTicks > 0) {
                 continue;
             }
             if (!place(level, lock, ship, shipId)) {
@@ -304,7 +321,7 @@ public final class CarryRuntime {
             LOCKS.remove(key);
         }
         for (ServerSubLevel ship : container.getAllSubLevels()) {
-            if (ship.isRemoved()) {
+            if (ship.isRemoved() || piloting(level, ship)) {
                 continue;
             }
             String key = prefix + ship.getUniqueId();
@@ -315,6 +332,15 @@ public final class CarryRuntime {
                     ? new BlockContact.Touch(CarryGate.Contact.NONE, null)
                     : BlockContact.touch(ship, supports, CarryGate.CAPTURE_GAP);
             if (touch.contact() != CarryGate.Contact.RESTING || touch.supportId() == null) {
+                continue;
+            }
+            // A stopped deck must not grab the car again. Idle release would otherwise be undone
+            // on the next tick, and a drive off the elevator would be pulled back.
+            Sample sample = SAMPLES.get(prefix + touch.supportId());
+            boolean deckMoving = sample != null
+                    && (sample.translation.length() >= CarryGate.IDLE_ANCHOR
+                    || Math.abs(sample.angleRadians) >= CarryGate.IDLE_ANGLE);
+            if (!deckMoving) {
                 continue;
             }
             // The first resting tick starts a provisional lock so a bearing can keep the car
@@ -347,13 +373,20 @@ public final class CarryRuntime {
             return false;
         }
         List<SupportMotion> mine = forId(supports, lock.contraptionId);
-        CarryGate.Contact contact = mine.isEmpty()
-                ? CarryGate.Contact.NONE
-                : BlockContact.touch(ship, mine, CarryGate.MAINTAIN_GAP).contact();
+        CarryGate.Contact contact = maintain(ship, mine);
         if (contact == CarryGate.Contact.NONE) {
-            return false;
+            // One resting tick can be a graze. After a second, allow the same gap as a confirmed ride.
+            if (lock.contactTicks < 2) {
+                return false;
+            }
+            lock.missTicks++;
+            if (lock.missTicks >= CarryGate.NO_CONTACT_RELEASE) {
+                SableSafeLanding.LOGGER.info("LIVE deck release ship {} reason=nocontact", shipId);
+                return false;
+            }
         }
         if (contact == CarryGate.Contact.RESTING) {
+            lock.missTicks = 0;
             lock.contactTicks++;
             if (lock.contactTicks >= CarryGate.CONTACT_HOLD) {
                 lock.confirmed = true;
@@ -398,20 +431,33 @@ public final class CarryRuntime {
         Vector3dc velocity = ship.latestLinearVelocity;
         double upward = velocity == null ? 0.0 : velocity.y();
         List<SupportMotion> mine = forId(supports, lock.contraptionId);
-        CarryGate.Contact contact = mine.isEmpty()
-                ? CarryGate.Contact.NONE
-                : BlockContact.touch(ship, mine, CarryGate.MAINTAIN_GAP).contact();
+        CarryGate.Contact contact = maintain(ship, mine);
         lock.missTicks = CarryGate.nextMisses(lock.missTicks, contact);
-        return CarryGate.release(false, false, upward, deckUp, lock.idleTicks, lock.missTicks);
+        boolean clear = clearance(ship, mine) > CarryGate.TAKEOFF_CLEARANCE;
+        lock.takeoffTicks = CarryGate.nextTakeoff(lock.takeoffTicks, upward, deckUp, clear);
+        return CarryGate.release(false, false, lock.takeoffTicks, lock.idleTicks, lock.missTicks);
     }
 
     /**
      * @return false when the correction is too far and the lock should be dropped
      */
     private static boolean place(ServerLevel level, DeckLock lock, ServerSubLevel ship, String shipId) {
-        net.minecraft.world.phys.Vec3 anchor = lock.contraption.getAnchorVec();
-        Vec3 pivot = new Vec3(anchor.x + 0.5, anchor.y + 0.5, anchor.z + 0.5);
+        // The block entity has already stepped the anchor. The kinematic collider is still at
+        // the pre-physics sample, and a teleport to the live anchor puts the car inside it.
+        // The solver then pops the car up and that one tick looks like a takeoff.
+        Sample sample = SAMPLES.get(level.dimension().location() + "\0" + lock.contraptionId);
+        net.minecraft.world.phys.Vec3 live = lock.contraption.getAnchorVec();
+        double anchorX = live.x;
+        double anchorY = live.y;
+        double anchorZ = live.z;
         double angle = Math.toRadians(deckAngle(lock.contraption));
+        if (sample != null && sample.time == level.getGameTime()) {
+            anchorX = sample.x;
+            anchorY = sample.y;
+            anchorZ = sample.z;
+            angle = Math.toRadians(sample.angle);
+        }
+        Vec3 pivot = new Vec3(anchorX + 0.5, anchorY + 0.5, anchorZ + 0.5);
         Vec3 target = DeckFollow.worldTarget(lock.local, pivot, lock.axis, angle);
         Vector3dc current = ship.logicalPose().position();
         Vec3 from = new Vec3(current.x(), current.y(), current.z());
@@ -437,11 +483,15 @@ public final class CarryRuntime {
         Vector3d position = new Vector3d(target.x(), target.y(), target.z());
         PhysicsPipeline pipeline = pipeline(level);
         if (pipeline != null) {
+            // A sleeping body keeps its old pose, so the next read looks like a launch upward.
+            // Wake only for a drift correction. A parked deck never reaches this call.
+            pipeline.wakeUp(ship);
             pipeline.teleport(ship, position, orientation);
         } else {
             ship.logicalPose().position().set(position);
             ship.logicalPose().orientation().set(orientation);
         }
+        ship.updateLastPose();
         lock.lastPlacedAngle = angle;
         ship.updateBoundingBox();
         if (PLACEMENT_LOGGED.add(shipId)) {
@@ -453,7 +503,7 @@ public final class CarryRuntime {
                     fmt(dy),
                     fmt(dx),
                     fmt(dz),
-                    fmt(anchor.y),
+                    fmt(anchorY),
                     lock.contraption.isRemoved()
             );
         }
@@ -503,6 +553,47 @@ public final class CarryRuntime {
                 anchorZ
         ));
         return true;
+    }
+
+    /** Positive when the hull is above the deck. No horizontal overlap counts as clear. */
+    private static double clearance(ServerSubLevel ship, List<SupportMotion> supports) {
+        if (supports.isEmpty()) {
+            return Double.POSITIVE_INFINITY;
+        }
+        BoundingBox3dc box = ship.boundingBox();
+        Aabb body = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+        double best = Double.POSITIVE_INFINITY;
+        boolean overlapped = false;
+        for (SupportMotion support : supports) {
+            if (!body.overlapsHorizontally(support.volume())) {
+                continue;
+            }
+            overlapped = true;
+            best = Math.min(best, box.minY() - support.volume().maxY());
+        }
+        return overlapped ? best : Double.POSITIVE_INFINITY;
+    }
+
+    /**
+     * Block bottoms decide a new contact. Once the hull is already on the deck, its box keeps
+     * the lock through a yaw: the bottoms move around the pose while the box still sits on the planks.
+     */
+    private static CarryGate.Contact maintain(ServerSubLevel ship, List<SupportMotion> supports) {
+        if (supports.isEmpty()) {
+            return CarryGate.Contact.NONE;
+        }
+        BlockContact.Touch touch = BlockContact.touch(ship, supports, CarryGate.MAINTAIN_GAP);
+        if (touch.contact() != CarryGate.Contact.NONE) {
+            return touch.contact();
+        }
+        BoundingBox3dc box = ship.boundingBox();
+        Aabb body = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+        for (SupportMotion support : supports) {
+            if (DeckContact.restingBox(body, support.volume(), CarryGate.MAINTAIN_GAP)) {
+                return CarryGate.Contact.RESTING;
+            }
+        }
+        return CarryGate.Contact.NONE;
     }
 
     private static boolean disassembled(AbstractContraptionEntity entity) {
@@ -697,7 +788,7 @@ public final class CarryRuntime {
      * previous position before the next pre-physics event. The delta between two pre-physics
      * samples is that motion. The first sample of a game tick owns the anchor used for the
      * volumes, so later substeps and the post tick test contact against the pose the ship is
-     * still standing on. Placement reads the live anchor.
+     * still standing on. Placement uses that same sample, which is where the kinematic collider is.
      */
     private static List<SupportMotion> blocks(String dimension, AbstractContraptionEntity entity, long gameTime) {
         Contraption contraption = entity.getContraption();

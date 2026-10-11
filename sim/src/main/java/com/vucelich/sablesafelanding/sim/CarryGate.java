@@ -11,6 +11,11 @@ public final class CarryGate {
     /** Ticks of confirmed absence before the lock is dropped. An inconclusive scan does not count. */
     public static final int NO_CONTACT_RELEASE = 8;
     public static final int IDLE_TICKS = 10;
+    /**
+     * Ticks of upward speed, above the deck, before a launch counts. One tick is the contact
+     * solver returning a ship that was teleported onto the collider.
+     */
+    public static final int TAKEOFF_TICKS = 3;
     /** Blocks of deck drift before another teleport. */
     public static final double DRIFT = 0.2;
     /** Radians of bearing drift before another teleport. Eight degrees. */
@@ -62,16 +67,32 @@ public final class CarryGate {
         };
     }
 
+    /** Blocks above the deck before a climb counts as leaving. A contact correction is smaller. */
+    public static final double TAKEOFF_CLEARANCE = 1.0;
+
+    /**
+     * Consecutive ticks the ship is clear of the deck and climbing faster than it.
+     * A solver pop while the car is still on the blocks does not count, and neither does a
+     * pose readback that matches the deck's own upward speed.
+     */
+    public static int nextTakeoff(int streak, double upwardSpeed, double deckUpSpeed, boolean clearOfDeck) {
+        if (!clearOfDeck) {
+            return 0;
+        }
+        if (upwardSpeed > AntiClipStep.TAKEOFF_SPEED && upwardSpeed > deckUpSpeed + AntiClipStep.TAKEOFF_SPEED) {
+            return streak + 1;
+        }
+        return 0;
+    }
+
     /**
      * Why the lock should drop, or null to keep it.
-     * Takeoff is speed above the deck, so a teleport that the pose readback reports as
-     * the deck's own upward speed does not count as leaving.
+     * {@code takeoffTicks} comes from {@link #nextTakeoff}.
      */
     public static Reason release(
             boolean disassembled,
             boolean piloting,
-            double upwardSpeed,
-            double deckUpSpeed,
+            int takeoffTicks,
             int idleTicks,
             int missTicks
     ) {
@@ -81,7 +102,7 @@ public final class CarryGate {
         if (piloting) {
             return Reason.PILOT;
         }
-        if (upwardSpeed > AntiClipStep.TAKEOFF_SPEED && upwardSpeed > deckUpSpeed + AntiClipStep.TAKEOFF_SPEED) {
+        if (takeoffTicks >= TAKEOFF_TICKS) {
             return Reason.TAKEOFF;
         }
         if (idleTicks >= IDLE_TICKS) {

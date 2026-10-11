@@ -274,10 +274,15 @@ public final class LiveTrial {
                 shiftShip(level, ship, 3.0, 0.0, 0.0);
                 log("{} shoved x={} held={}", scene.name, fmt(ship.logicalPose().position().x()), held(ship));
             }
-            if (scene.tail == Tail.PILOT && phaseTick == reportAt && ship != null && !ship.isRemoved()) {
-                markerY = ship.logicalPose().position().y();
-                shiftShip(level, ship, 0.0, 1.0, 0.0);
-                log("{} shoved y={} held={}", scene.name, fmt(ship.logicalPose().position().y()), held(ship));
+            if (scene.tail == Tail.PILOT && phaseTick >= reportAt && ship != null && !ship.isRemoved()) {
+                if (phaseTick == reportAt) {
+                    markerY = ship.logicalPose().position().y();
+                }
+                // Gravity erases one shove before the report. Keep climbing, and carry must not pull it back.
+                shiftShip(level, ship, 0.0, 0.4, 0.0);
+                if (phaseTick == reportAt) {
+                    log("{} shoved y={} held={}", scene.name, fmt(ship.logicalPose().position().y()), held(ship));
+                }
             }
         }
         if (activatedAt >= 0 && phaseTick == doneTick(scene)) {
@@ -326,15 +331,20 @@ public final class LiveTrial {
         }
         ship.updateBoundingBox();
         double top = surface + 2.0 + scene.seatLift;
-        double minY = ship.boundingBox().minY();
-        if (minY == 0.0 && ship.boundingBox().maxY() == 0.0) {
+        BoundingBox3dc box = ship.boundingBox();
+        double minY = box.minY();
+        if (minY == 0.0 && box.maxY() == 0.0) {
             minY = ship.logicalPose().position().y() - 0.5;
         }
+        // The elevator contraption is the contact block. Put the hull on that block, not beside it.
         // A bearing rotates around its own anchor, so the car has to sit off that axis.
-        double xTarget = contraption.getX() + (scene.kind == Kind.BEARING ? 1.0 : 0.0);
+        double deckX = contraption.getAnchorVec().x + 0.5 + (scene.kind == Kind.BEARING ? 1.0 : 0.0);
+        double deckZ = contraption.getAnchorVec().z + 0.5;
+        double centerX = (box.minX() + box.maxX()) * 0.5;
+        double centerZ = (box.minZ() + box.maxZ()) * 0.5;
         double gap = minY - top;
-        if (Math.abs(gap) > 0.05 || Math.abs(ship.logicalPose().position().x() - xTarget) > 0.2) {
-            shiftShip(level, ship, xTarget - ship.logicalPose().position().x(), top - minY, contraption.getZ() - ship.logicalPose().position().z());
+        if (Math.abs(gap) > 0.05 || Math.abs(centerX - deckX) > 0.2 || Math.abs(centerZ - deckZ) > 0.2) {
+            shiftShip(level, ship, deckX - centerX, top - minY, deckZ - centerZ);
             seated = true;
         }
         ship.latestLinearVelocity.zero();

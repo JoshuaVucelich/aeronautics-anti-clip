@@ -30,13 +30,18 @@ class CarryGateTest {
 
     @Test
     void eachReleaseHasItsOwnReason() {
-        assertEquals(CarryGate.Reason.DISASSEMBLED, CarryGate.release(true, true, 4.0, 0.0, 20, 20));
-        assertEquals(CarryGate.Reason.PILOT, CarryGate.release(false, true, 4.0, 0.0, 20, 20));
-        assertEquals(CarryGate.Reason.TAKEOFF, CarryGate.release(false, false, 1.0, 0.0, 20, 20));
-        assertNull(CarryGate.release(false, false, 0.6, 0.4, 0, 0));
-        assertEquals(CarryGate.Reason.IDLE, CarryGate.release(false, false, 0.0, 0.0, CarryGate.IDLE_TICKS, 0));
-        assertEquals(CarryGate.Reason.NOCONTACT, CarryGate.release(false, false, 0.0, 0.0, 0, CarryGate.NO_CONTACT_RELEASE));
-        assertNull(CarryGate.release(false, false, 0.0, 0.0, CarryGate.IDLE_TICKS - 1, CarryGate.NO_CONTACT_RELEASE - 1));
+        assertEquals(CarryGate.Reason.DISASSEMBLED, CarryGate.release(true, true, 9, 20, 20));
+        assertEquals(CarryGate.Reason.PILOT, CarryGate.release(false, true, 9, 20, 20));
+        assertEquals(0, CarryGate.nextTakeoff(2, 0.4, 0.0, true));
+        assertEquals(1, CarryGate.nextTakeoff(0, 1.0, 0.0, true));
+        assertEquals(0, CarryGate.nextTakeoff(1, 0.6, 0.4, true));
+        assertEquals(0, CarryGate.nextTakeoff(2, 8.0, 0.0, false));
+        assertNull(CarryGate.release(false, false, 1, 0, 0));
+        assertEquals(CarryGate.Reason.IDLE, CarryGate.release(false, false, 1, 20, 20));
+        assertEquals(CarryGate.Reason.TAKEOFF, CarryGate.release(false, false, CarryGate.TAKEOFF_TICKS, 20, 20));
+        assertEquals(CarryGate.Reason.IDLE, CarryGate.release(false, false, 0, CarryGate.IDLE_TICKS, 0));
+        assertEquals(CarryGate.Reason.NOCONTACT, CarryGate.release(false, false, 0, 0, CarryGate.NO_CONTACT_RELEASE));
+        assertNull(CarryGate.release(false, false, 0, CarryGate.IDLE_TICKS - 1, CarryGate.NO_CONTACT_RELEASE - 1));
         assertEquals("idle", CarryGate.reasonName(CarryGate.Reason.IDLE));
         assertEquals("nocontact", CarryGate.reasonName(CarryGate.Reason.NOCONTACT));
         assertEquals("disassembled", CarryGate.reasonName(CarryGate.Reason.DISASSEMBLED));
@@ -85,7 +90,12 @@ class CarryGateTest {
         Vec3 flyover = new Vec3(1.5, 11.7, 1.5);
         Vec3 between = new Vec3(1.5, 11.3, 1.5);
         assertTrue(DeckContact.rests(parked, deck, CarryGate.CAPTURE_GAP));
+        assertTrue(DeckContact.rests(new Vec3(3.2, 11.0, 1.5), deck, CarryGate.CAPTURE_GAP));
+        assertFalse(DeckContact.rests(new Vec3(4.2, 11.0, 1.5), deck, CarryGate.CAPTURE_GAP));
         assertFalse(DeckContact.rests(flyover, deck, CarryGate.CAPTURE_GAP));
+        Aabb hull = new Aabb(1.0, 11.0, 1.0, 2.0, 12.0, 2.0);
+        assertTrue(DeckContact.restingBox(hull, deck, CarryGate.MAINTAIN_GAP));
+        assertFalse(DeckContact.restingBox(hull.translate(new Vec3(0.0, 0.7, 0.0)), deck, CarryGate.CAPTURE_GAP));
         assertFalse(DeckContact.rests(between, deck, CarryGate.CAPTURE_GAP));
         assertTrue(DeckContact.rests(between, deck, CarryGate.MAINTAIN_GAP));
         assertFalse(DeckContact.rests(flyover, deck, CarryGate.MAINTAIN_GAP));
