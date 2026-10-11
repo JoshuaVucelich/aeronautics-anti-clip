@@ -41,6 +41,10 @@ dependencies {
         exclude group: 'com.simibubi.create'
     }
     compileOnly "dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:${companion_version}"
+    compileOnly("com.simibubi.create:create-${minecraft_version}:${create_version}") {
+        exclude group: 'foundry.veil'
+    }
+    compileOnly "net.createmod.ponder:ponder-neoforge:${ponder_version}"
 }
 
 tasks.named('jar', Jar).configure {

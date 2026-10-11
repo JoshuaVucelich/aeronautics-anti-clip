@@ -16,6 +16,7 @@ public final class SableSafeLanding {
     public SableSafeLanding(IEventBus modBus, ModContainer container) {
         container.registerConfig(ModConfig.Type.COMMON, SafeLandingConfig.SPEC);
         NeoForge.EVENT_BUS.addListener(VoidRescueRuntime::onPrePhysics);
+        NeoForge.EVENT_BUS.addListener(ColliderFeedRuntime::onPrePhysics);
         LOGGER.info("Aeronautics Anti-Clip {} loaded", SafeLandingConfig.VERSION);
     }
 }
