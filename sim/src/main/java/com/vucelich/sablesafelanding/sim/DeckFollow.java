@@ -27,6 +27,18 @@ public final class DeckFollow {
     }
 
     /**
+     * Boarding orientation plus the bearing turn since capture.
+     * The delta is {@code currentRadians - capturedRadians} about the bearing axis, applied in
+     * world space so it matches {@link #worldTarget}. A pilot is released before this runs.
+     */
+    public static Rot orientation(Rot boarded, Vec3 axis, double capturedRadians, double currentRadians) {
+        if (boarded == null || !boarded.finite() || axis == null || !axis.finite()) {
+            return Rot.IDENTITY;
+        }
+        return boarded.turned(axis, currentRadians - capturedRadians);
+    }
+
+    /**
      * A ride correction. Vertical travel can be the whole elevator move, because the solver
      * may have held the ship on a floor the deck already left. A large horizontal jump is a fling.
      */

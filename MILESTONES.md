@@ -41,6 +41,7 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 
 - Spatial hash, merged support boxes, NaN rejection, per-feature kill switches, and a rate-limited failure path.
 - Repro: `HardeningTest`.
-- A fed collider samples the contraption anchor once per tick so Rapier's kinematic velocity is the real platform motion. That contact pushes a car up and does not pull it down, and a velocity aimed through the deck is cancelled. While the car is resting, its offset in the deck frame is stored. After the contraption moves, the server tick places the car on the new pivot and angle. A horizontal correction past 8 blocks is refused, so a bearing cannot fling the car. Steps larger than 0.75 blocks or 25 degrees are ignored when sampling the ride.
+- A fed collider samples the contraption anchor once per tick so Rapier's kinematic velocity is the real platform motion. That contact pushes a car up and does not pull it down, and a velocity aimed through the deck is cancelled. Steps larger than 0.75 blocks or 25 degrees are ignored when sampling the ride. The feed does not capture or teleport.
+- Carry stores the deck-frame offset only after real block contact holds, and only while the flag is on. The server tick teleports the car when the deck drifts, rotating position and yaw by the bearing angle since capture. The lock releases on lost contact, disassembly, an idle deck, takeoff speed, or a steering player. A horizontal correction past 8 blocks is refused.
 - A separate bedrock rescue restores a sub-level that has stayed below min build height minus 32 blocks for 40 ticks to its last safe pose in the same dimension, with velocity zeroed. It does not use the 32-block distance gate, and it does not fire at the remove bounds.
-- Version `0.6.0-rc.15` jar. Still not published to Modrinth or CurseForge.
+- Version `0.6.0-rc.16` jar. Still not published to Modrinth or CurseForge.

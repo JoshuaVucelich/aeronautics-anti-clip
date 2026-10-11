@@ -4,9 +4,10 @@ import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.Contraption;
 import com.simibubi.create.content.contraptions.ControlledContraptionEntity;
 import com.vucelich.sablesafelanding.sim.Aabb;
+import com.vucelich.sablesafelanding.sim.AabbMerger;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import com.vucelich.sablesafelanding.sim.AntiClipStep;
-import com.vucelich.sablesafelanding.sim.BodyState;
+import com.vucelich.sablesafelanding.sim.CarryGate;
 import com.vucelich.sablesafelanding.sim.DeckFollow;
 import com.vucelich.sablesafelanding.sim.RateLimiter;
 import com.vucelich.sablesafelanding.sim.Rot;
@@ -24,16 +25,20 @@ import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.phys.AABB;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.joml.Quaterniond;
 import org.joml.Quaterniondc;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -43,34 +48,100 @@ import java.util.UUID;
  * game tick, kept for every substep of the current tick so the ship velocity stays at that rate.
  * A delta past the ride cap is dropped here.
  * <p>
- * A kinematic deck pushes a car out of itself and does not pull one down, and a velocity aimed
- * through that deck is cancelled. While the car is resting, its offset in the deck frame is
- * stored. After the contraption block entity has moved, the server tick places the car at that
- * offset on the deck's new pivot and angle. Feed and carry both use this placement. With both
- * off, nothing is stored and the car is left where the solver put it.
+ * A kinematic deck pushes a car out of itself and does not pull one down. Carry, and only carry,
+ * starts a provisional follow on the first real block contact so a bearing does not rotate out
+ * from under the car. The follow becomes a capture after that contact has held for several ticks,
+ * and a miss before then drops it. The collider feed never starts a follow.
+ * The collider feed does not capture and does not teleport. After the contraption block entity
+ * has moved, the server tick places the car when the deck has drifted past a threshold. The
+ * placement is a pose, so it is not applied again while the deck is still.
+ * <p>
+ * The lock is dropped when contact is gone, the contraption is removed or disassembled, the deck
+ * sits idle, upward speed leaves the deck, or a player is steering. Steering also skips the
+ * placement, so pilot input is not written back.
+ * <p>
+ * Ship-hull parks an unpiloted hull at or under 0.05 blocks/s. Its notes say a Sable
+ * center-of-mass teleport is copied onto that parked pose and is not a wake. Sable 2.0.3
+ * {@code RapierPhysicsPipeline.teleport} writes the Rapier body, then the logical pose, and
+ * returns without {@code wakeUp}. This listener calls {@code PhysicsPipeline.teleport} from
+ * {@code ServerTickEvent.Post} only, and does not call {@code wakeUp} or {@code resetVelocity}
+ * afterwards. A following wake would unpark the hull and jitter the car. The ship-hull mixin
+ * source was not in this workspace; the Sable method order was read from that class, and the
+ * "teleport is not a wake" rule from ship-hull 1.0.0-phase7.
  */
 public final class CarryRuntime {
     private static final net.minecraft.world.phys.Vec3 ROTATION_OFFSET = new net.minecraft.world.phys.Vec3(0.5, 0.5, 0.5);
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static final Map<String, Sample> SAMPLES = new HashMap<>();
     private static final Map<String, DeckLock> LOCKS = new HashMap<>();
+    private static final Map<String, CachedSupports> SUPPORT_CACHE = new HashMap<>();
     private static final Set<String> PLACEMENT_LOGGED = new HashSet<>();
+    private static final Field JUMPING = jumpingField();
 
     /**
-     * Offset of the ship origin in the deck frame, captured while the ship was on the platform.
-     * The contraption is kept by reference: a piston moving outside the entity-ticking distance
-     * drops out of the level lookup while its block entity is still moving it.
-     * Orientation is the pose from boarding, so a contact shove cannot tip the car into the deck.
+     * Deck-frame offset and boarding orientation, captured once contact has held.
+     * The contraption is kept by reference: a piston outside the entity-ticking distance drops
+     * out of the level lookup while its block entity is still moving it. The reference is
+     * dropped when that entity is actually removed or the contraption has no blocks.
+     * {@code capturedAngle} is Create's accumulated angle, not a wrapped one-tick sample.
      */
-    private record DeckLock(
-            AbstractContraptionEntity contraption,
-            Vec3 local,
-            Vec3 axis,
-            double orientationX,
-            double orientationY,
-            double orientationZ,
-            double orientationW
-    ) {
+    private static final class DeckLock {
+        private final AbstractContraptionEntity contraption;
+        private final String contraptionId;
+        private final ServerSubLevel ship;
+        private final Vec3 local;
+        private final Vec3 axis;
+        private final double orientationX;
+        private final double orientationY;
+        private final double orientationZ;
+        private final double orientationW;
+        private final double capturedAngle;
+        private double lastAnchorX;
+        private double lastAnchorY;
+        private double lastAnchorZ;
+        private double lastAngle;
+        private double lastPlacedAngle;
+        private int idleTicks;
+        private int missTicks;
+        private int contactTicks;
+        private boolean confirmed;
+
+        private DeckLock(
+                AbstractContraptionEntity contraption,
+                String contraptionId,
+                ServerSubLevel ship,
+                Vec3 local,
+                Vec3 axis,
+                double orientationX,
+                double orientationY,
+                double orientationZ,
+                double orientationW,
+                double capturedAngle,
+                double anchorX,
+                double anchorY,
+                double anchorZ
+        ) {
+            this.contraption = contraption;
+            this.contraptionId = contraptionId;
+            this.ship = ship;
+            this.local = local;
+            this.axis = axis;
+            this.orientationX = orientationX;
+            this.orientationY = orientationY;
+            this.orientationZ = orientationZ;
+            this.orientationW = orientationW;
+            this.capturedAngle = capturedAngle;
+            this.lastAnchorX = anchorX;
+            this.lastAnchorY = anchorY;
+            this.lastAnchorZ = anchorZ;
+            this.lastAngle = capturedAngle;
+            this.lastPlacedAngle = capturedAngle;
+            this.contactTicks = 1;
+        }
+    }
+
+    /** Bearing angle at capture, and the yaw of the pose that was boarded. */
+    public record YawSample(double capturedDeckDegrees, double boardedYawDegrees, boolean held) {
     }
 
     private record Sample(
@@ -83,6 +154,9 @@ public final class CarryRuntime {
             double angleRadians,
             Vec3 axis
     ) {
+    }
+
+    private record CachedSupports(long time, List<SupportMotion> supports) {
     }
 
     private CarryRuntime() {
@@ -102,17 +176,7 @@ public final class CarryRuntime {
             if (!config.carry() && !config.sweep() && !config.feedColliders()) {
                 return;
             }
-            List<SupportMotion> supports = new ArrayList<>();
-            int seen = 0;
-            for (Entity candidate : level.getAllEntities()) {
-                if (!(candidate instanceof AbstractContraptionEntity entity) || !ColliderFeedRuntime.isWorldSupport(entity)) {
-                    continue;
-                }
-                if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
-                    break;
-                }
-                supports.addAll(blocks(level.dimension().location().toString(), entity, level.getGameTime()));
-            }
+            List<SupportMotion> supports = supportsFor(level);
             if (supports.isEmpty()) {
                 return;
             }
@@ -120,24 +184,21 @@ public final class CarryRuntime {
                 return;
             }
             PhysicsPipeline pipeline = system.getPipeline();
-            java.util.List<ServerSubLevel> ships = new java.util.ArrayList<>();
+            List<ServerSubLevel> ships = new ArrayList<>();
             for (ServerSubLevel subLevel : container.getAllSubLevels()) {
                 if (!subLevel.isRemoved()) {
                     ships.add(subLevel);
                 }
             }
             VoidRescueRuntime.advanceAll(ships, pipeline, supports, event.getTimeStep());
-            if (config.feedColliders() || config.carry()) {
-                rememberDeck(level, ships, supports, config);
-            }
         } catch (RuntimeException ex) {
             logFailure(ex);
         }
     }
 
     /**
-     * The contraption block entity has already applied this tick's motion. Put a locked car on
-     * the deck now, so the placement is still there when the trial reads the pose.
+     * The contraption block entity has already applied this tick's motion. Capture, release,
+     * and a drift-threshold placement all happen here, once per game tick.
      */
     public static void onServerTick(ServerTickEvent.Post event) {
         if (!event.getServer().isSameThread()) {
@@ -145,15 +206,12 @@ public final class CarryRuntime {
         }
         try {
             AntiClipConfig config = SafeLandingConfig.snapshot();
-            if (!config.feedColliders() && !config.carry()) {
+            if (!config.carry()) {
                 LOCKS.clear();
                 return;
             }
-            if (LOCKS.isEmpty()) {
-                return;
-            }
             for (ServerLevel level : event.getServer().getAllLevels()) {
-                placeLocked(level);
+                tickCarry(level);
             }
         } catch (RuntimeException ex) {
             logFailure(ex);
@@ -163,6 +221,7 @@ public final class CarryRuntime {
     public static void clear() {
         SAMPLES.clear();
         LOCKS.clear();
+        SUPPORT_CACHE.clear();
         PLACEMENT_LOGGED.clear();
     }
 
@@ -170,63 +229,45 @@ public final class CarryRuntime {
         String prefix = dimension + "\0";
         SAMPLES.keySet().removeIf(key -> key.startsWith(prefix));
         LOCKS.keySet().removeIf(key -> key.startsWith(prefix));
+        SUPPORT_CACHE.remove(dimension);
     }
 
-    /**
-     * Capture the deck-frame offset the first time a ship is resting on a moving contraption.
-     * Later substeps keep that offset. Recapturing after the solver has held the ship still
-     * would store the gap and the car would never catch the deck.
-     */
-    private static void rememberDeck(ServerLevel level, List<ServerSubLevel> ships, List<SupportMotion> supports, AntiClipConfig config) {
-        String dimension = level.dimension().location().toString();
-        for (ServerSubLevel ship : ships) {
-            if (ship.isRemoved()) {
-                continue;
-            }
-            String key = dimension + "\0" + ship.getUniqueId();
-            BodyState body = bodyOf(ship);
-            SupportMotion support = AntiClipStep.ridingSupport(body, supports, config);
-            if (support == null) {
-                continue;
-            }
-            // Keep the first offset. Recapturing after the car has sunk into the deck, or after a
-            // lookup miss dropped the lock, stores the gap and the car never catches a piston.
-            if (LOCKS.containsKey(key)) {
-                continue;
-            }
-            boolean moving = support.translation().lengthSquared() > 1.0e-8 || Math.abs(support.angleRadians()) > 1.0e-9;
-            if (!moving) {
-                continue;
-            }
-            AbstractContraptionEntity contraption = findContraption(level, support.id());
-            if (contraption == null) {
-                continue;
-            }
-            double angle = Math.toRadians(deckAngle(contraption));
-            Vec3 local = DeckFollow.localOffset(body.position(), support.pivot(), support.axis(), angle);
-            if (!local.finite()) {
-                continue;
-            }
-            Quaterniondc boarded = ship.logicalPose().orientation();
-            LOCKS.put(key, new DeckLock(
-                    contraption,
-                    local,
-                    support.axis(),
-                    boarded.x(),
-                    boarded.y(),
-                    boarded.z(),
-                    boarded.w()
-            ));
+    public static boolean holding(UUID shipId) {
+        DeckLock lock = lockFor(shipId);
+        return lock != null && lock.confirmed;
+    }
+
+    public static YawSample yawSample(UUID shipId) {
+        DeckLock lock = lockFor(shipId);
+        if (lock == null || !lock.confirmed) {
+            return new YawSample(0.0, 0.0, false);
         }
+        double boarded = Math.toDegrees(new Rot(
+                lock.orientationX, lock.orientationY, lock.orientationZ, lock.orientationW
+        ).yaw());
+        return new YawSample(Math.toDegrees(lock.capturedAngle), boarded, true);
     }
 
-    private static void placeLocked(ServerLevel level) {
+    private static DeckLock lockFor(UUID shipId) {
+        if (shipId == null) {
+            return null;
+        }
+        String suffix = "\0" + shipId;
+        for (Map.Entry<String, DeckLock> entry : LOCKS.entrySet()) {
+            if (entry.getKey().endsWith(suffix)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    private static void tickCarry(ServerLevel level) {
         if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
             return;
         }
-        PhysicsPipeline pipeline = SubLevelPhysicsSystem.require(level).getPipeline();
         String dimension = level.dimension().location().toString();
         String prefix = dimension + "\0";
+        List<SupportMotion> supports = withLocks(level, dimension, supportsFor(level));
         List<String> drop = new ArrayList<>();
         for (Map.Entry<String, DeckLock> entry : LOCKS.entrySet()) {
             if (!entry.getKey().startsWith(prefix)) {
@@ -234,93 +275,391 @@ public final class CarryRuntime {
             }
             DeckLock lock = entry.getValue();
             String shipId = entry.getKey().substring(prefix.length());
-            ServerSubLevel ship = findShip(container, shipId);
-            AbstractContraptionEntity contraption = lock.contraption();
-            // A piston outside entity-ticking range is removed from the level while its block
-            // entity keeps writing the anchor. The stored reference still has that pose.
-            if (ship == null) {
+            ServerSubLevel ship = lock.ship;
+            if (ship == null || ship.isRemoved()) {
                 drop.add(entry.getKey());
                 continue;
             }
-            if (contraption == null) {
+            if (!lock.confirmed) {
+                if (!holdUntilConfirmed(level, lock, ship, shipId, supports)) {
+                    drop.add(entry.getKey());
+                }
                 continue;
             }
-            net.minecraft.world.phys.Vec3 anchor = contraption.getAnchorVec();
-            Vec3 pivot = new Vec3(anchor.x + 0.5, anchor.y + 0.5, anchor.z + 0.5);
-            double angle = Math.toRadians(deckAngle(contraption));
-            Vec3 target = DeckFollow.worldTarget(lock.local, pivot, lock.axis, angle);
-            Vector3dc current = ship.logicalPose().position();
-            Vec3 from = new Vec3(current.x(), current.y(), current.z());
-            if (!DeckFollow.acceptable(from, target)) {
+            CarryGate.Reason reason = releaseReason(level, lock, ship, supports);
+            if (reason != null) {
+                SableSafeLanding.LOGGER.info(
+                        "LIVE deck release ship {} reason={}",
+                        shipId,
+                        CarryGate.reasonName(reason)
+                );
                 drop.add(entry.getKey());
-                SableSafeLanding.LOGGER.info(
-                        "LIVE deck release ship {} d=({},{},{})",
-                        shipId,
-                        fmt(target.x() - from.x()),
-                        fmt(target.y() - from.y()),
-                        fmt(target.z() - from.z())
-                );
                 continue;
             }
-            double dx = target.x() - from.x();
-            double dy = target.y() - from.y();
-            double dz = target.z() - from.z();
-            if (dx * dx + dy * dy + dz * dz < 1.0e-8) {
-                continue;
-            }
-            Quaterniond orientation = new Quaterniond(lock.orientationX(), lock.orientationY(), lock.orientationZ(), lock.orientationW());
-            Vector3d position = new Vector3d(target.x(), target.y(), target.z());
-            if (pipeline != null) {
-                pipeline.wakeUp(ship);
-                pipeline.teleport(ship, position, orientation);
-                pipeline.resetVelocity(ship);
-            } else {
-                ship.logicalPose().position().set(position);
-            }
-            ship.latestLinearVelocity.zero();
-            ship.latestAngularVelocity.zero();
-            ship.updateBoundingBox();
-            if (PLACEMENT_LOGGED.add(shipId) || (Math.abs(dy) > 1.0 && PLACEMENT_LOGGED.add(shipId + ":far"))) {
-                SableSafeLanding.LOGGER.info(
-                        "LIVE deck {} y {} -> {} dy={} dx={} dz={} anchorY={} removed={}",
-                        shipId,
-                        fmt(from.y()),
-                        fmt(target.y()),
-                        fmt(dy),
-                        fmt(dx),
-                        fmt(dz),
-                        fmt(anchor.y),
-                        contraption.isRemoved()
-                );
+            if (!place(level, lock, ship, shipId)) {
+                drop.add(entry.getKey());
             }
         }
-        drop.forEach(LOCKS::remove);
+        for (String key : drop) {
+            LOCKS.remove(key);
+        }
+        for (ServerSubLevel ship : container.getAllSubLevels()) {
+            if (ship.isRemoved()) {
+                continue;
+            }
+            String key = prefix + ship.getUniqueId();
+            if (LOCKS.containsKey(key)) {
+                continue;
+            }
+            BlockContact.Touch touch = supports.isEmpty()
+                    ? new BlockContact.Touch(CarryGate.Contact.NONE, null)
+                    : BlockContact.touch(ship, supports, CarryGate.CAPTURE_GAP);
+            if (touch.contact() != CarryGate.Contact.RESTING || touch.supportId() == null) {
+                continue;
+            }
+            // The first resting tick starts a provisional lock so a bearing can keep the car
+            // on the planks. It is not captured until contact has held. A miss before that drops it.
+            if (capture(level, dimension, ship, key, touch.supportId())) {
+                DeckLock created = LOCKS.get(key);
+                if (created != null) {
+                    place(level, created, ship, ship.getUniqueId().toString());
+                }
+            }
+        }
     }
 
-    private static ServerSubLevel findShip(ServerSubLevelContainer container, String id) {
-        for (ServerSubLevel subLevel : container.getAllSubLevels()) {
-            if (subLevel.getUniqueId().toString().equals(id) && !subLevel.isRemoved()) {
-                return subLevel;
+    /**
+     * @return false when the provisional lock should be dropped
+     */
+    private static boolean holdUntilConfirmed(
+            ServerLevel level,
+            DeckLock lock,
+            ServerSubLevel ship,
+            String shipId,
+            List<SupportMotion> supports
+    ) {
+        if (disassembled(lock.contraption)) {
+            SableSafeLanding.LOGGER.info("LIVE deck release ship {} reason=disassembled", shipId);
+            return false;
+        }
+        if (piloting(level, ship)) {
+            SableSafeLanding.LOGGER.info("LIVE deck release ship {} reason=pilot", shipId);
+            return false;
+        }
+        List<SupportMotion> mine = forId(supports, lock.contraptionId);
+        CarryGate.Contact contact = mine.isEmpty()
+                ? CarryGate.Contact.NONE
+                : BlockContact.touch(ship, mine, CarryGate.MAINTAIN_GAP).contact();
+        if (contact == CarryGate.Contact.NONE) {
+            return false;
+        }
+        if (contact == CarryGate.Contact.RESTING) {
+            lock.contactTicks++;
+            if (lock.contactTicks >= CarryGate.CONTACT_HOLD) {
+                lock.confirmed = true;
+                lock.idleTicks = 0;
+                lock.missTicks = 0;
+                net.minecraft.world.phys.Vec3 anchor = lock.contraption.getAnchorVec();
+                lock.lastAnchorX = anchor.x;
+                lock.lastAnchorY = anchor.y;
+                lock.lastAnchorZ = anchor.z;
+                lock.lastAngle = Math.toRadians(deckAngle(lock.contraption));
+                SableSafeLanding.LOGGER.info(
+                        "LIVE deck capture ship {} contraption {}",
+                        shipId,
+                        lock.contraptionId
+                );
             }
         }
-        return null;
+        return place(level, lock, ship, shipId);
+    }
+
+    private static CarryGate.Reason releaseReason(
+            ServerLevel level,
+            DeckLock lock,
+            ServerSubLevel ship,
+            List<SupportMotion> supports
+    ) {
+        if (disassembled(lock.contraption)) {
+            return CarryGate.Reason.DISASSEMBLED;
+        }
+        if (piloting(level, ship)) {
+            return CarryGate.Reason.PILOT;
+        }
+        net.minecraft.world.phys.Vec3 anchor = lock.contraption.getAnchorVec();
+        double angle = Math.toRadians(deckAngle(lock.contraption));
+        double anchorDelta = distance(anchor.x, anchor.y, anchor.z, lock.lastAnchorX, lock.lastAnchorY, lock.lastAnchorZ);
+        double deckUp = (anchor.y - lock.lastAnchorY) * 20.0;
+        lock.idleTicks = CarryGate.nextIdle(lock.idleTicks, anchorDelta, Math.abs(angle - lock.lastAngle));
+        lock.lastAnchorX = anchor.x;
+        lock.lastAnchorY = anchor.y;
+        lock.lastAnchorZ = anchor.z;
+        lock.lastAngle = angle;
+        Vector3dc velocity = ship.latestLinearVelocity;
+        double upward = velocity == null ? 0.0 : velocity.y();
+        List<SupportMotion> mine = forId(supports, lock.contraptionId);
+        CarryGate.Contact contact = mine.isEmpty()
+                ? CarryGate.Contact.NONE
+                : BlockContact.touch(ship, mine, CarryGate.MAINTAIN_GAP).contact();
+        lock.missTicks = CarryGate.nextMisses(lock.missTicks, contact);
+        return CarryGate.release(false, false, upward, deckUp, lock.idleTicks, lock.missTicks);
+    }
+
+    /**
+     * @return false when the correction is too far and the lock should be dropped
+     */
+    private static boolean place(ServerLevel level, DeckLock lock, ServerSubLevel ship, String shipId) {
+        net.minecraft.world.phys.Vec3 anchor = lock.contraption.getAnchorVec();
+        Vec3 pivot = new Vec3(anchor.x + 0.5, anchor.y + 0.5, anchor.z + 0.5);
+        double angle = Math.toRadians(deckAngle(lock.contraption));
+        Vec3 target = DeckFollow.worldTarget(lock.local, pivot, lock.axis, angle);
+        Vector3dc current = ship.logicalPose().position();
+        Vec3 from = new Vec3(current.x(), current.y(), current.z());
+        if (!DeckFollow.acceptable(from, target)) {
+            SableSafeLanding.LOGGER.info(
+                    "LIVE deck release ship {} reason=separated d=({},{},{})",
+                    shipId,
+                    fmt(target.x() - from.x()),
+                    fmt(target.y() - from.y()),
+                    fmt(target.z() - from.z())
+            );
+            return false;
+        }
+        double dx = target.x() - from.x();
+        double dy = target.y() - from.y();
+        double dz = target.z() - from.z();
+        if (!CarryGate.teleport(dx * dx + dy * dy + dz * dz, angle - lock.lastPlacedAngle)) {
+            return true;
+        }
+        Rot boarded = new Rot(lock.orientationX, lock.orientationY, lock.orientationZ, lock.orientationW);
+        Rot turned = DeckFollow.orientation(boarded, lock.axis, lock.capturedAngle, angle);
+        Quaterniond orientation = new Quaterniond(turned.x(), turned.y(), turned.z(), turned.w());
+        Vector3d position = new Vector3d(target.x(), target.y(), target.z());
+        PhysicsPipeline pipeline = pipeline(level);
+        if (pipeline != null) {
+            pipeline.teleport(ship, position, orientation);
+        } else {
+            ship.logicalPose().position().set(position);
+            ship.logicalPose().orientation().set(orientation);
+        }
+        lock.lastPlacedAngle = angle;
+        ship.updateBoundingBox();
+        if (PLACEMENT_LOGGED.add(shipId)) {
+            SableSafeLanding.LOGGER.info(
+                    "LIVE deck {} y {} -> {} dy={} dx={} dz={} anchorY={} removed={}",
+                    shipId,
+                    fmt(from.y()),
+                    fmt(target.y()),
+                    fmt(dy),
+                    fmt(dx),
+                    fmt(dz),
+                    fmt(anchor.y),
+                    lock.contraption.isRemoved()
+            );
+        }
+        return true;
+    }
+
+    private static boolean capture(ServerLevel level, String dimension, ServerSubLevel ship, String key, String contraptionId) {
+        AbstractContraptionEntity contraption = findContraption(level, contraptionId);
+        if (disassembled(contraption)) {
+            return false;
+        }
+        // The support sample for this tick is the pose the ship is still standing on.
+        // The live anchor has already moved, and baking that into the offset leaves a gap.
+        Sample sample = SAMPLES.get(dimension + "\0" + contraptionId);
+        net.minecraft.world.phys.Vec3 live = contraption.getAnchorVec();
+        double anchorX = live.x;
+        double anchorY = live.y;
+        double anchorZ = live.z;
+        double angle = Math.toRadians(deckAngle(contraption));
+        if (sample != null && sample.time == level.getGameTime()) {
+            anchorX = sample.x;
+            anchorY = sample.y;
+            anchorZ = sample.z;
+            angle = Math.toRadians(sample.angle);
+        }
+        Vec3 pivot = new Vec3(anchorX + 0.5, anchorY + 0.5, anchorZ + 0.5);
+        Vec3 axis = rotationAxis(contraption);
+        Vector3dc position = ship.logicalPose().position();
+        Vec3 local = DeckFollow.localOffset(new Vec3(position.x(), position.y(), position.z()), pivot, axis, angle);
+        if (!local.finite()) {
+            return false;
+        }
+        Quaterniondc boarded = ship.logicalPose().orientation();
+        LOCKS.put(key, new DeckLock(
+                contraption,
+                contraptionId,
+                ship,
+                local,
+                axis,
+                boarded.x(),
+                boarded.y(),
+                boarded.z(),
+                boarded.w(),
+                angle,
+                anchorX,
+                anchorY,
+                anchorZ
+        ));
+        return true;
+    }
+
+    private static boolean disassembled(AbstractContraptionEntity entity) {
+        if (entity == null || entity.isRemoved() || !entity.isAlive()) {
+            return true;
+        }
+        Contraption contraption = entity.getContraption();
+        return contraption == null || contraption.getBlocks().isEmpty();
+    }
+
+    private static boolean piloting(ServerLevel level, ServerSubLevel ship) {
+        BoundingBox3dc box = ship.boundingBox();
+        AABB aabb = new AABB(
+                box.minX() - 1.0, box.minY() - 1.0, box.minZ() - 1.0,
+                box.maxX() + 1.0, box.maxY() + 1.0, box.maxZ() + 1.0
+        );
+        if (!level.getEntitiesOfClass(Player.class, aabb, CarryRuntime::steering).isEmpty()) {
+            return true;
+        }
+        for (Player player : level.players()) {
+            if (aabb.contains(player.getX(), player.getY(), player.getZ()) && steering(player)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean steering(Player player) {
+        return player.xxa != 0.0f || player.zza != 0.0f || player.yya != 0.0f || jumping(player);
+    }
+
+    private static boolean jumping(Player player) {
+        if (JUMPING == null) {
+            return false;
+        }
+        try {
+            return JUMPING.getBoolean(player);
+        } catch (IllegalAccessException ex) {
+            return false;
+        }
+    }
+
+    private static Field jumpingField() {
+        try {
+            Field field = net.minecraft.world.entity.LivingEntity.class.getDeclaredField("jumping");
+            field.setAccessible(true);
+            return field;
+        } catch (NoSuchFieldException ex) {
+            return null;
+        }
     }
 
     private static AbstractContraptionEntity findContraption(ServerLevel level, String id) {
+        for (AbstractContraptionEntity entity : contraptions(level)) {
+            if (entity.getUUID().toString().equals(id)) {
+                return entity;
+            }
+        }
+        for (DeckLock lock : LOCKS.values()) {
+            if (id.equals(lock.contraptionId) && lock.contraption != null) {
+                return lock.contraption;
+            }
+        }
         try {
             Entity direct = level.getEntity(UUID.fromString(id));
-            if (direct instanceof AbstractContraptionEntity contraption && contraption.isAlive()) {
+            if (direct instanceof AbstractContraptionEntity contraption) {
                 return contraption;
             }
         } catch (IllegalArgumentException ex) {
             return null;
         }
+        return null;
+    }
+
+    private static List<SupportMotion> supportsFor(ServerLevel level) {
+        String dimension = level.dimension().location().toString();
+        long time = level.getGameTime();
+        CachedSupports cached = SUPPORT_CACHE.get(dimension);
+        if (cached != null && cached.time == time) {
+            return cached.supports;
+        }
+        List<SupportMotion> supports = new ArrayList<>();
+        int seen = 0;
+        for (AbstractContraptionEntity entity : contraptions(level)) {
+            if (!ColliderFeedRuntime.isWorldSupport(entity)) {
+                continue;
+            }
+            if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
+                break;
+            }
+            supports.addAll(blocks(dimension, entity, time));
+        }
+        SUPPORT_CACHE.put(dimension, new CachedSupports(time, supports));
+        return supports;
+    }
+
+    /**
+     * A held piston can leave the entity tracker while its block entity keeps moving the anchor.
+     * Its volumes are appended from the stored reference so contact does not look empty.
+     */
+    private static List<SupportMotion> withLocks(ServerLevel level, String dimension, List<SupportMotion> supports) {
+        String prefix = dimension + "\0";
+        List<SupportMotion> extra = null;
+        long time = level.getGameTime();
+        for (Map.Entry<String, DeckLock> entry : LOCKS.entrySet()) {
+            if (!entry.getKey().startsWith(prefix)) {
+                continue;
+            }
+            DeckLock lock = entry.getValue();
+            if (disassembled(lock.contraption)) {
+                continue;
+            }
+            boolean present = false;
+            for (SupportMotion support : supports) {
+                if (support.id().equals(lock.contraptionId)) {
+                    present = true;
+                    break;
+                }
+            }
+            if (present) {
+                continue;
+            }
+            if (extra == null) {
+                extra = new ArrayList<>(supports);
+            }
+            extra.addAll(blocks(dimension, lock.contraption, time));
+        }
+        return extra == null ? supports : extra;
+    }
+
+    private static List<AbstractContraptionEntity> contraptions(ServerLevel level) {
+        List<AbstractContraptionEntity> tracked = ColliderFeedRuntime.tracked(level);
+        if (!tracked.isEmpty()) {
+            return tracked;
+        }
+        List<AbstractContraptionEntity> scanned = new ArrayList<>();
+        int seen = 0;
         for (Entity candidate : level.getAllEntities()) {
-            if (candidate.getUUID().toString().equals(id) && candidate instanceof AbstractContraptionEntity contraption && contraption.isAlive()) {
-                return contraption;
+            if (!(candidate instanceof AbstractContraptionEntity entity)) {
+                continue;
+            }
+            if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
+                break;
+            }
+            scanned.add(entity);
+        }
+        return scanned;
+    }
+
+    private static List<SupportMotion> forId(List<SupportMotion> supports, String id) {
+        List<SupportMotion> mine = new ArrayList<>();
+        for (SupportMotion support : supports) {
+            if (support.id().equals(id)) {
+                mine.add(support);
             }
         }
-        return null;
+        return mine;
     }
 
     private static float deckAngle(AbstractContraptionEntity entity) {
@@ -330,28 +669,35 @@ public final class CarryRuntime {
         return 0.0f;
     }
 
-    private static BodyState bodyOf(ServerSubLevel subLevel) {
-        BoundingBox3dc box = subLevel.boundingBox();
-        Vector3dc position = subLevel.logicalPose().position();
-        return new BodyState(
-                subLevel.getUniqueId().toString(),
-                new Vec3(position.x(), position.y(), position.z()),
-                Vec3.ZERO,
-                new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ()),
-                Rot.IDENTITY,
-                false
-        );
+    private static Vec3 rotationAxis(AbstractContraptionEntity entity) {
+        if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
+            return axis(controlled.getRotationAxis());
+        }
+        return new Vec3(0.0, 1.0, 0.0);
+    }
+
+    private static PhysicsPipeline pipeline(ServerLevel level) {
+        SubLevelPhysicsSystem system = SubLevelPhysicsSystem.get(level);
+        return system == null ? null : system.getPipeline();
+    }
+
+    private static double distance(double x, double y, double z, double ox, double oy, double oz) {
+        double dx = x - ox;
+        double dy = y - oy;
+        double dz = z - oz;
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
     private static String fmt(double value) {
-        return String.format(java.util.Locale.ROOT, "%.3f", value);
+        return String.format(Locale.ROOT, "%.3f", value);
     }
 
     /**
      * Block-entity ticks move the contraption and then the entity copies that pose into its
      * previous position before the next pre-physics event. The delta between two pre-physics
-     * samples is that motion. The first sample stores the pose and applies no delta. Later
-     * substeps of the same tick reuse the delta so the velocity is not cleared after one substep.
+     * samples is that motion. The first sample of a game tick owns the anchor used for the
+     * volumes, so later substeps and the post tick test contact against the pose the ship is
+     * still standing on. Placement reads the live anchor.
      */
     private static List<SupportMotion> blocks(String dimension, AbstractContraptionEntity entity, long gameTime) {
         Contraption contraption = entity.getContraption();
@@ -383,7 +729,7 @@ public final class CarryRuntime {
                     }
                 }
                 if (raw.length() > 1.0e-4 || Math.abs(Mth.wrapDegrees(angleNow - previous.angle)) > 0.05f) {
-                    PlatformTrace.note(id, String.format(java.util.Locale.ROOT,
+                    PlatformTrace.note(id, String.format(Locale.ROOT,
                             "shift=(%.3f,%.3f,%.3f) applied=(%.3f,%.3f,%.3f) angleDeg=%.2f",
                             raw.x(), raw.y(), raw.z(),
                             translation.x(), translation.y(), translation.z(),
@@ -395,10 +741,13 @@ public final class CarryRuntime {
         }
         Vec3 pivot = new Vec3(sample.x + 0.5, sample.y + 0.5, sample.z + 0.5);
         net.minecraft.world.phys.Vec3 anchorNow = new net.minecraft.world.phys.Vec3(sample.x, sample.y, sample.z);
-        List<SupportMotion> supports = new ArrayList<>();
+        List<Aabb> boxes = new ArrayList<>();
         for (BlockPos pos : contraption.getBlocks().keySet()) {
             Aabb local = new Aabb(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0);
-            Aabb world = Aabb.enclosing(corners(entity, local, anchorNow, 1.0f));
+            boxes.add(Aabb.enclosing(corners(entity, local, anchorNow, 1.0f)));
+        }
+        List<SupportMotion> supports = new ArrayList<>();
+        for (Aabb world : AabbMerger.merge(boxes)) {
             supports.add(new SupportMotion(id, world, sample.translation, pivot, sample.axis, sample.angleRadians));
         }
         return supports;

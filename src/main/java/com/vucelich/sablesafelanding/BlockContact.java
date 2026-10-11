@@ -1,6 +1,9 @@
 package com.vucelich.sablesafelanding;
 
+import com.vucelich.sablesafelanding.sim.CarryGate;
+import com.vucelich.sablesafelanding.sim.DeckContact;
 import com.vucelich.sablesafelanding.sim.SupportMotion;
+import com.vucelich.sablesafelanding.sim.Vec3;
 import dev.ryanhcode.sable.companion.math.BoundingBox3ic;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.plot.PlotChunkHolder;
@@ -10,6 +13,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import org.joml.Vector3d;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -57,5 +61,72 @@ public final class BlockContact {
             }
         }
         return false;
+    }
+
+    /**
+     * Resting contact for the carry lock. Bottoms are scanned from the lowest block upward so a
+     * hull floor is inside the {@link #MAX_BLOCKS} cap. Hitting the cap without a contact is
+     * inconclusive: the caller must not treat that as "no contact".
+     */
+    public record Touch(CarryGate.Contact contact, String supportId) {
+    }
+
+    public static Touch touch(ServerSubLevel subLevel, List<SupportMotion> supports, double epsilon) {
+        if (supports.isEmpty() || subLevel.getPlot() == null) {
+            return new Touch(CarryGate.Contact.NONE, null);
+        }
+        int minY = Integer.MAX_VALUE;
+        int maxY = Integer.MIN_VALUE;
+        List<PlotChunkHolder> holders = new ArrayList<>();
+        for (PlotChunkHolder holder : subLevel.getPlot().getLoadedChunks()) {
+            LevelChunk chunk = holder.getChunk();
+            BoundingBox3ic local = holder.getBoundingBox();
+            if (chunk == null || local == null || local.volume() <= 0) {
+                continue;
+            }
+            holders.add(holder);
+            minY = Math.min(minY, local.minY());
+            maxY = Math.max(maxY, local.maxY());
+        }
+        if (holders.isEmpty()) {
+            return new Touch(CarryGate.Contact.NONE, null);
+        }
+        int seen = 0;
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int y = minY; y <= maxY; y++) {
+            for (PlotChunkHolder holder : holders) {
+                BoundingBox3ic local = holder.getBoundingBox();
+                if (local == null || y < local.minY() || y > local.maxY()) {
+                    continue;
+                }
+                LevelChunk chunk = holder.getChunk();
+                if (chunk == null) {
+                    continue;
+                }
+                ChunkPos pos = chunk.getPos();
+                for (int x = local.minX(); x <= local.maxX(); x++) {
+                    for (int z = local.minZ(); z <= local.maxZ(); z++) {
+                        cursor.set(pos.getMinBlockX() + x, y, pos.getMinBlockZ() + z);
+                        if (chunk.getBlockState(cursor).isAir()) {
+                            continue;
+                        }
+                        seen++;
+                        Vector3d world = subLevel.logicalPose().transformPosition(
+                                new Vector3d(cursor.getX() + 0.5, cursor.getY(), cursor.getZ() + 0.5)
+                        );
+                        Vec3 bottom = new Vec3(world.x, world.y, world.z);
+                        for (SupportMotion support : supports) {
+                            if (DeckContact.rests(bottom, support.volume(), epsilon)) {
+                                return new Touch(CarryGate.Contact.RESTING, support.id());
+                            }
+                        }
+                        if (seen >= MAX_BLOCKS) {
+                            return new Touch(CarryGate.Contact.INCONCLUSIVE, null);
+                        }
+                    }
+                }
+            }
+        }
+        return new Touch(CarryGate.Contact.NONE, null);
     }
 }

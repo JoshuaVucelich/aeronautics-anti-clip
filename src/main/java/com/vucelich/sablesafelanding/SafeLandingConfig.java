@@ -4,7 +4,7 @@ import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.6.0-rc.15";
+    public static final String VERSION = "0.6.0-rc.16";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -32,7 +32,7 @@ public final class SafeLandingConfig {
                 .comment("Feed moving elevator, bearing, piston, and gantry colliders into Sable/Rapier.")
                 .define("feedColliders", defaults.feedColliders());
         CARRY = builder
-                .comment("Match a resting sub-level to a contraption's per-tick velocity, including a small bearing rotation. Off unless feed is also off: feed uses the same coupling. A step larger than 0.75 blocks or 25 degrees is ignored.")
+                .comment("Teleport a sub-level with a contraption after several ticks of real block contact. The collider feed does not capture. The lock releases after contact is gone, the contraption is removed, the deck sits idle, upward speed leaves the deck, or a player is steering. Placement runs only after the deck drifts, and it does not clear velocity.")
                 .define("carry", defaults.carry());
         SWEEP = builder
                 .comment("Swept correction against contraption blocks. Off by default. When on, it moves a ship only if a real ship block overlaps a contraption block.")

@@ -25,8 +25,22 @@ The sim module does not start Minecraft or link Rapier.
 ./gradlew build
 ```
 
-The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.6.0-rc.15`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
+The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.6.0-rc.16`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
 
 A dedicated server started with `-Dsable_safe_landing.live=true` runs a scripted trial: a sub-level below min build height, a sub-level at Sable's remove bound, and a vehicle on an elevator, a bearing, and a piston. It logs lines prefixed with `LIVE` and then stops.
+
+## Carry
+
+Carry is off unless the config flag is on. The collider feed uploads the deck and does not capture or teleport the car.
+
+A lock starts only after a ship block's bottom has stayed on the deck for 5 ticks, within 0.2 blocks. A pass 0.6 blocks above the deck does not count. The lock ends when any of these happen: 8 ticks with no contact, the contraption is removed or disassembled, the deck is idle for 10 ticks, upward speed leaves the deck, or a player is steering. An inconclusive scan of a large ship (the 128-block cap) does not count as lost contact.
+
+The server tick places the car only after the deck has drifted more than 0.2 blocks or the bearing has turned more than 8 degrees. The placement is `PhysicsPipeline.teleport`. It does not call `wakeUp` or `resetVelocity`, and it does not zero the ship's velocity, so a parked hull can sleep and a takeoff can climb off.
+
+The angle stored at capture is Create's accumulated bearing angle. Later ticks rotate the captured offset and the boarding orientation by the difference around the bearing axis. Steering releases the lock first, so that rotation is not applied over the pilot's turn.
+
+Create 6.0.10 `AbstractContraptionEntity.tick` calls `Map.entrySet` once, on `collidingEntities`. Sable 2.0.3 injects that call. This mod's hook uses the same invoke with ordinal 0 and mixin priority 1100, so it runs after Sable adds its kinematic. Sable's collider is suppressed only after this mod has claimed the contraption.
+
+Sable 2.0.3 `RapierPhysicsPipeline.teleport` writes the Rapier body, copies that pose onto the sub-level, and returns without waking the body. Ship-hull 1.0.0-phase7 treats a Sable center-of-mass teleport as a copy onto a parked pose and not as a wake. This mod's teleport is that call, from `ServerTickEvent.Post`, and nothing after it wakes the body. The ship-hull mixin sources were not in this workspace; the Sable order was read from `RapierPhysicsPipeline`, and the wake rule from the ship-hull README.
 
 This project is not published to Modrinth or CurseForge.

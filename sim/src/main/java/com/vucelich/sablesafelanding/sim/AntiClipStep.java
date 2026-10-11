@@ -199,7 +199,7 @@ public final class AntiClipStep {
     }
 
     /** Upward speed, in blocks per second, that means the ship is leaving the platform. */
-    static final double TAKEOFF_SPEED = 0.5;
+    public static final double TAKEOFF_SPEED = 0.5;
     /** Blocks of platform motion in one tick. Anything larger is a bad sample and is ignored. */
     public static final double MAX_RIDE_STEP = 0.75;
     /** Degrees of platform rotation in one tick. A larger turn is not applied. */

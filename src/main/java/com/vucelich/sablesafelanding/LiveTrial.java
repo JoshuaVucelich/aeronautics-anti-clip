@@ -20,6 +20,8 @@ import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
 import dev.ryanhcode.sable.companion.math.BoundingBox3i;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
+import com.mojang.authlib.GameProfile;
+import com.vucelich.sablesafelanding.sim.Rot;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.FaceAttachedHorizontalDirectionalBlock;
@@ -28,6 +30,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -37,14 +40,18 @@ import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.level.block.state.properties.DirectionProperty;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.neoforged.neoforge.common.util.FakePlayer;
+import net.neoforged.neoforge.common.util.FakePlayerFactory;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.joml.Quaterniond;
+import org.joml.Quaterniondc;
 import org.joml.Vector3d;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Scripted dedicated-server trial. Enabled with {@code -Dsable_safe_landing.live=true}.
@@ -57,18 +64,32 @@ public final class LiveTrial {
         ELEVATOR, BEARING, PISTON
     }
 
-    private record Scene(String name, Kind kind, boolean feed, boolean carry, int direction, int moveTicks) {
+    private enum Tail {
+        NONE, DRIVE, DROP, FLY, YAW, PILOT
+    }
+
+    private record Scene(String name, Kind kind, boolean feed, boolean carry, int direction, int moveTicks, Tail tail, double seatLift) {
     }
 
     private static final Scene[] SCENES = {
-            new Scene("elevator-off", Kind.ELEVATOR, false, false, -1, 48),
-            new Scene("elevator-down", Kind.ELEVATOR, true, false, -1, 48),
-            new Scene("elevator-up", Kind.ELEVATOR, true, false, 1, 48),
-            new Scene("elevator-carry", Kind.ELEVATOR, true, true, -1, 48),
-            new Scene("bearing-feed", Kind.BEARING, true, false, 0, 24),
-            new Scene("bearing-carry", Kind.BEARING, true, true, 0, 24),
-            new Scene("piston-feed", Kind.PISTON, true, false, 1, 64)
+            new Scene("elevator-off", Kind.ELEVATOR, false, false, -1, 48, Tail.NONE, 0.0),
+            new Scene("elevator-down", Kind.ELEVATOR, true, false, -1, 48, Tail.NONE, 0.0),
+            new Scene("elevator-up", Kind.ELEVATOR, true, false, 1, 48, Tail.NONE, 0.0),
+            new Scene("elevator-carry", Kind.ELEVATOR, true, true, -1, 48, Tail.NONE, 0.0),
+            new Scene("bearing-feed", Kind.BEARING, true, false, 0, 24, Tail.NONE, 0.0),
+            new Scene("bearing-carry", Kind.BEARING, true, true, 0, 24, Tail.YAW, 0.0),
+            new Scene("bearing-yaw", Kind.BEARING, true, true, 0, 24, Tail.YAW, 0.0),
+            new Scene("piston-feed", Kind.PISTON, true, false, 1, 64, Tail.NONE, 0.0),
+            new Scene("elevator-stop", Kind.ELEVATOR, true, true, -1, 48, Tail.DRIVE, 0.0),
+            new Scene("elevator-drop", Kind.ELEVATOR, true, true, -1, 16, Tail.DROP, 0.0),
+            new Scene("flyover", Kind.ELEVATOR, true, true, -1, 32, Tail.FLY, 0.7),
+            new Scene("pilot-takeoff", Kind.ELEVATOR, true, true, 1, 36, Tail.PILOT, 0.0)
     };
+
+    private static final GameProfile PILOT_PROFILE = new GameProfile(
+            UUID.fromString("6f1c0a1e-7b2d-4c3a-9e10-a1b2c3d4e5f6"),
+            "DeckPilot"
+    );
 
     private enum Phase {
         WARMUP,
@@ -93,6 +114,11 @@ public final class LiveTrial {
     private static boolean seated;
     private static boolean bedrockNoted;
     private static int activatedAt = -1;
+    private static double startDeckDeg;
+    private static double startYawDeg;
+    private static double markerX = Double.NaN;
+    private static double markerY = Double.NaN;
+    private static FakePlayer pilot;
 
     private LiveTrial() {
     }
@@ -130,7 +156,7 @@ public final class LiveTrial {
 
     private static void warmup(ServerLevel level) {
         if (surface == Integer.MIN_VALUE) {
-            for (int cx = -1; cx <= 9; cx++) {
+            for (int cx = -1; cx <= 16; cx++) {
                 for (int cz = -1; cz <= 2; cz++) {
                     level.setChunkForced(cx, cz, true);
                     level.getChunk(cx, cz);
@@ -196,6 +222,8 @@ public final class LiveTrial {
             seated = false;
             ship = null;
             activatedAt = -1;
+            markerX = Double.NaN;
+            markerY = Double.NaN;
             assembleScene(level, scene, origin);
         } else if (activatedAt < 0 && phaseTick >= 8) {
             float speed = controller instanceof KineticBlockEntity kinetic ? kinetic.getSpeed() : 0.0f;
@@ -221,12 +249,38 @@ public final class LiveTrial {
                 startX = ship == null ? Double.NaN : ship.logicalPose().position().x();
                 startZ = ship == null ? Double.NaN : ship.logicalPose().position().z();
                 startAnchorY = contraption.getAnchorVec().y;
+                startDeckDeg = deckDegrees(contraption);
+                startYawDeg = ship == null ? Double.NaN : yawDegrees(ship);
                 log("{} seated {}", scene.name, describe(ship));
             }
-        } else if (activatedAt >= 0 && phaseTick > activatedAt + 4 && phaseTick <= activatedAt + 4 + scene.moveTicks()
-                && contraption != null && contraption.isAlive()) {
-            nudge(scene, phaseTick - (activatedAt + 4));
-        } else if (activatedAt >= 0 && phaseTick == activatedAt + 5 + scene.moveTicks()) {
+        } else if (activatedAt >= 0 && phaseTick > activatedAt + 4 && contraption != null) {
+            int step = phaseTick - (activatedAt + 4);
+            int reportAt = activatedAt + 5 + scene.moveTicks();
+            if (step <= scene.moveTicks() && contraption.isAlive()) {
+                nudge(scene, step);
+            }
+            if (scene.tail == Tail.FLY && ship != null && !ship.isRemoved()) {
+                holdFlyover(level, scene);
+            }
+            if (scene.tail == Tail.PILOT && step >= 8) {
+                steerPilot(level);
+            }
+            if (scene.tail == Tail.DROP && phaseTick == reportAt && contraption.isAlive()) {
+                disassembleController();
+                log("{} disassembled alive={}", scene.name, contraption.isAlive());
+            }
+            if (scene.tail == Tail.DRIVE && phaseTick == reportAt + 20 && ship != null && !ship.isRemoved()) {
+                markerX = ship.logicalPose().position().x();
+                shiftShip(level, ship, 3.0, 0.0, 0.0);
+                log("{} shoved x={} held={}", scene.name, fmt(ship.logicalPose().position().x()), held(ship));
+            }
+            if (scene.tail == Tail.PILOT && phaseTick == reportAt && ship != null && !ship.isRemoved()) {
+                markerY = ship.logicalPose().position().y();
+                shiftShip(level, ship, 0.0, 1.0, 0.0);
+                log("{} shoved y={} held={}", scene.name, fmt(ship.logicalPose().position().y()), held(ship));
+            }
+        }
+        if (activatedAt >= 0 && phaseTick == doneTick(scene)) {
             report(scene);
             cleanup(level, origin);
             sceneIndex++;
@@ -234,6 +288,19 @@ public final class LiveTrial {
             return;
         }
         phaseTick++;
+    }
+
+    private static int doneTick(Scene scene) {
+        if (activatedAt < 0) {
+            return Integer.MAX_VALUE;
+        }
+        int reportAt = activatedAt + 5 + scene.moveTicks();
+        return switch (scene.tail) {
+            case DRIVE -> reportAt + 32;
+            case DROP -> reportAt + 8;
+            case PILOT -> reportAt + 10;
+            default -> reportAt;
+        };
     }
 
     private static void assembleScene(ServerLevel level, Scene scene, int origin) {
@@ -258,7 +325,7 @@ public final class LiveTrial {
             return;
         }
         ship.updateBoundingBox();
-        double top = surface + 2.0;
+        double top = surface + 2.0 + scene.seatLift;
         double minY = ship.boundingBox().minY();
         if (minY == 0.0 && ship.boundingBox().maxY() == 0.0) {
             minY = ship.logicalPose().position().y() - 0.5;
@@ -271,6 +338,54 @@ public final class LiveTrial {
             seated = true;
         }
         ship.latestLinearVelocity.zero();
+    }
+
+    /** Holds a flyover above the deck so gravity cannot turn it into contact. */
+    private static void holdFlyover(ServerLevel level, Scene scene) {
+        if (ship == null || ship.isRemoved() || contraption == null) {
+            return;
+        }
+        double top = surface + 2.0 + scene.seatLift;
+        double minY = ship.boundingBox().minY();
+        shiftShip(
+                level,
+                ship,
+                contraption.getX() - ship.logicalPose().position().x(),
+                top - minY,
+                contraption.getZ() - ship.logicalPose().position().z()
+        );
+        ship.latestLinearVelocity.zero();
+    }
+
+    private static void steerPilot(ServerLevel level) {
+        if (ship == null || ship.isRemoved()) {
+            return;
+        }
+        if (pilot == null) {
+            pilot = FakePlayerFactory.get(level, PILOT_PROFILE);
+        }
+        org.joml.Vector3dc pos = ship.logicalPose().position();
+        pilot.setPos(pos.x(), pos.y() + 0.1, pos.z());
+        pilot.xxa = 0.0f;
+        pilot.yya = 0.0f;
+        pilot.zza = 1.0f;
+        if (level.getEntity(pilot.getUUID()) != null) {
+            return;
+        }
+        try {
+            boolean added = level.addFreshEntity(pilot);
+            log("pilot added={} pos={}", added, pos);
+        } catch (RuntimeException ex) {
+            log("pilot add failed {}", ex.toString());
+        }
+    }
+
+    private static void disassembleController() {
+        if (controller instanceof LinearActuatorBlockEntity actuator) {
+            actuator.disassemble();
+        } else if (controller instanceof MechanicalBearingBlockEntity bearing) {
+            bearing.disassemble();
+        }
     }
 
     private static void nudge(Scene scene, int step) {
@@ -364,12 +479,58 @@ public final class LiveTrial {
         String platform = contraption == null ? "none" : PlatformTrace.get(contraption.getUUID().toString());
         String ride = PlatformTrace.get("ride:" + ship.getUniqueId());
         org.joml.Vector3d velocity = ship.latestLinearVelocity;
-        log("{} outcome={} seated={} removed={} claimed={} dY={} dAnchor={} dX={} dZ={} minY={} posY={} anchorY={} velY={} platform=[{}] ride=[{}]",
+        boolean held = held(ship);
+        log("{} outcome={} seated={} removed={} claimed={} held={} dY={} dAnchor={} dX={} dZ={} minY={} posY={} anchorY={} velY={} platform=[{}] ride=[{}]",
                 scene.name, outcome, seated, ship.isRemoved(),
                 contraption != null && ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()),
+                held,
                 fmt(dY), fmt(dAnchor), fmt(dX), fmt(dZ), fmt(box.minY()), fmt(ship.logicalPose().position().y()),
                 fmt(anchorY), fmt(velocity.y),
                 platform, ride);
+        if (scene.kind == Kind.BEARING) {
+            double yawNow = yawDegrees(ship);
+            double deckNow = deckDegrees(contraption);
+            CarryRuntime.YawSample sample = CarryRuntime.yawSample(ship.getUniqueId());
+            double errSeat = Mth.wrapDegrees((float) ((yawNow - startYawDeg) - (deckNow - startDeckDeg)));
+            double errLock = sample.held()
+                    ? Mth.wrapDegrees((float) ((yawNow - sample.boardedYawDegrees()) - (deckNow - sample.capturedDeckDegrees())))
+                    : Double.NaN;
+            log("{} yaw dYaw={} dDeck={} errSeat={} errLock={} held={}",
+                    scene.name,
+                    fmt(yawNow - startYawDeg),
+                    fmt(deckNow - startDeckDeg),
+                    fmt(errSeat),
+                    fmt(errLock),
+                    sample.held());
+        }
+        if (scene.tail == Tail.DRIVE && Double.isFinite(markerX)) {
+            log("{} drive dX={} held={}", scene.name, fmt(ship.logicalPose().position().x() - markerX), held);
+        }
+        if (scene.tail == Tail.PILOT && Double.isFinite(markerY)) {
+            log("{} takeoff dY={} held={}", scene.name, fmt(ship.logicalPose().position().y() - markerY), held);
+        }
+        if (scene.tail == Tail.FLY) {
+            log("{} flyover held={}", scene.name, held);
+        }
+        if (scene.tail == Tail.DROP) {
+            log("{} drop held={} contraptionAlive={}", scene.name, held, contraption != null && contraption.isAlive());
+        }
+    }
+
+    private static boolean held(ServerSubLevel subLevel) {
+        return subLevel != null && CarryRuntime.holding(subLevel.getUniqueId());
+    }
+
+    private static double yawDegrees(ServerSubLevel subLevel) {
+        Quaterniondc orientation = subLevel.logicalPose().orientation();
+        return Math.toDegrees(new Rot(orientation.x(), orientation.y(), orientation.z(), orientation.w()).yaw());
+    }
+
+    private static double deckDegrees(AbstractContraptionEntity entity) {
+        if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
+            return controlled.getAngle(1.0f);
+        }
+        return 0.0;
     }
 
     /**
@@ -753,6 +914,12 @@ public final class LiveTrial {
             ship.markRemoved();
         }
         ship = null;
+        if (pilot != null) {
+            pilot.xxa = 0.0f;
+            pilot.yya = 0.0f;
+            pilot.zza = 0.0f;
+            pilot.setPos(0.0, -64.0, 0.0);
+        }
     }
 
     private static String describe(ServerSubLevel subLevel) {

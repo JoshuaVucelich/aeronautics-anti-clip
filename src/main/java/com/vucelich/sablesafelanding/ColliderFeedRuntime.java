@@ -67,6 +67,24 @@ public final class ColliderFeedRuntime {
     }
 
     /**
+     * Contraptions this mod is already feeding. Empty when the feed is off, so the caller scans
+     * the level once instead of every physics substep.
+     */
+    public static List<AbstractContraptionEntity> tracked(ServerLevel level) {
+        Map<String, FedContraptionCollider> fed = FED.get(level.dimension().location().toString());
+        if (fed == null || fed.isEmpty()) {
+            return List.of();
+        }
+        List<AbstractContraptionEntity> entities = new ArrayList<>(fed.size());
+        for (FedContraptionCollider collider : fed.values()) {
+            if (collider.entity() != null) {
+                entities.add(collider.entity());
+            }
+        }
+        return entities;
+    }
+
+    /**
      * Sable's initializer already added this entity to the pipeline. Drop that kinematic before
      * this mod uploads its own collider. Server thread only.
      */

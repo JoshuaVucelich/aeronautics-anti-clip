@@ -21,6 +21,13 @@ public record Rot(double x, double y, double z, double w) {
         return new Rot(k.x() * s, k.y() * s, k.z() * s, Math.cos(half)).mul(this);
     }
 
+    /** Yaw about +Y, in radians, in the range (-pi, pi]. */
+    public double yaw() {
+        double siny = 2.0 * (w * y + x * z);
+        double cosy = 1.0 - 2.0 * (y * y + x * x);
+        return Math.atan2(siny, cosy);
+    }
+
     public Rot mul(Rot other) {
         return new Rot(
                 w * other.x + x * other.w + y * other.z - z * other.y,

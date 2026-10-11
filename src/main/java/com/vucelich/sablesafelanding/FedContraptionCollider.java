@@ -45,6 +45,10 @@ public final class FedContraptionCollider implements KinematicContraption {
     private float fromAngle;
     private float toAngle;
 
+    public AbstractContraptionEntity entity() {
+        return entity;
+    }
+
     private FedContraptionCollider(AbstractContraptionEntity entity, BoundingBox3i localBounds, MassTracker massTracker) {
         this.entity = entity;
         this.localBounds = localBounds;
