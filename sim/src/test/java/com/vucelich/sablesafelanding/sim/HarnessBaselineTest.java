@@ -12,7 +12,7 @@ class HarnessBaselineTest {
         AntiClipConfig config = AntiClipConfig.defaults();
         assertTrue(config.voidRescue());
         assertTrue(config.feedColliders());
-        assertFalse(config.carry());
+        assertTrue(config.carry());
         assertFalse(config.sweep());
         assertTrue(config.bedrockRescue());
         assertEquals(32.0, config.bedrockMargin());

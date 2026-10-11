@@ -67,18 +67,13 @@ public final class CarryGate {
         };
     }
 
-    /** Blocks above the deck before a climb counts as leaving. A contact correction is smaller. */
-    public static final double TAKEOFF_CLEARANCE = 1.0;
-
     /**
-     * Consecutive ticks the ship is clear of the deck and climbing faster than it.
-     * A solver pop while the car is still on the blocks does not count, and neither does a
-     * pose readback that matches the deck's own upward speed.
+     * Consecutive ticks the ship is climbing faster than the deck.
+     * The streak starts from that relative upward speed while the car is still on the blocks,
+     * so thrust that is not a movement key can leave without being pulled back.
+     * A tick that is not faster than the deck resets the streak, including a one-tick solver pop.
      */
-    public static int nextTakeoff(int streak, double upwardSpeed, double deckUpSpeed, boolean clearOfDeck) {
-        if (!clearOfDeck) {
-            return 0;
-        }
+    public static int nextTakeoff(int streak, double upwardSpeed, double deckUpSpeed) {
         if (upwardSpeed > AntiClipStep.TAKEOFF_SPEED && upwardSpeed > deckUpSpeed + AntiClipStep.TAKEOFF_SPEED) {
             return streak + 1;
         }

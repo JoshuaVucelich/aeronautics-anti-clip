@@ -78,7 +78,7 @@ class HardeningTest {
         assertFalse(config.withFeedColliders(false).feedColliders());
         assertFalse(config.withCarry(false).carry());
         assertFalse(config.withSweep(false).sweep());
-        assertFalse(config.withSweep(false).carry());
+        assertTrue(config.withSweep(false).carry());
         assertTrue(config.withCarry(true).carry());
         assertEquals(4096, config.maxPairChecks());
 

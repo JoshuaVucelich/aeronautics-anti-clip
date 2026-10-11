@@ -50,16 +50,17 @@ import java.util.UUID;
  * A delta past the ride cap is dropped here.
  * <p>
  * A kinematic deck pushes a car out of itself and does not pull one down. Carry, and only carry,
- * starts a provisional follow on the first real block contact so a bearing does not rotate out
- * from under the car. The follow becomes a capture after that contact has held for several ticks,
- * and a miss before then drops it. The collider feed never starts a follow.
- * The collider feed does not capture and does not teleport. After the contraption block entity
- * has moved, the server tick places the car when the deck has drifted past a threshold. The
- * placement is a pose, so it is not applied again while the deck is still.
+ * starts a provisional lock on the first real block contact. The lock is not a capture, and the
+ * car is not placed, until that contact has held for {@link CarryGate#CONTACT_HOLD} ticks. A miss
+ * before then drops it. The collider feed never starts a lock and does not teleport.
+ * After the confirm, the server tick places the car when the deck has drifted past a threshold.
+ * The placement is a pose, so it is not applied again while the deck is still.
  * <p>
- * The lock is dropped when contact is gone, the contraption is removed or disassembled, the deck
- * sits idle, upward speed leaves the deck, or a player is steering. Steering also skips the
- * placement, so pilot input is not written back.
+ * Upward speed relative to the deck starts the takeoff streak while the car is still on the blocks.
+ * The car is not placed while that streak is running, so thrust from keys other than the movement
+ * keys is not pulled back onto the deck. The lock is also dropped when contact is gone, the
+ * contraption is removed or disassembled, the deck sits idle, or a player is steering. Steering
+ * skips the placement, so pilot input is not written back.
  * <p>
  * Ship-hull parks an unpiloted hull at or under 0.05 blocks/s. Its notes say a Sable
  * center-of-mass teleport is copied onto that parked pose and is not a wake. Sable 2.0.3
@@ -343,14 +344,9 @@ public final class CarryRuntime {
             if (!deckMoving) {
                 continue;
             }
-            // The first resting tick starts a provisional lock so a bearing can keep the car
-            // on the planks. It is not captured until contact has held. A miss before that drops it.
-            if (capture(level, dimension, ship, key, touch.supportId())) {
-                DeckLock created = LOCKS.get(key);
-                if (created != null) {
-                    place(level, created, ship, ship.getUniqueId().toString());
-                }
-            }
+            // The first resting tick starts a provisional lock. It is not placed until contact
+            // has held for the confirm. A miss before that drops it.
+            capture(level, dimension, ship, key, touch.supportId());
         }
     }
 
@@ -370,6 +366,18 @@ public final class CarryRuntime {
         }
         if (piloting(level, ship)) {
             SableSafeLanding.LOGGER.info("LIVE deck release ship {} reason=pilot", shipId);
+            return false;
+        }
+        // Count a climb before any placement. Thrust during the confirm must not be snapped back
+        // on the tick the lock becomes a capture.
+        noteTakeoff(lock, ship);
+        if (lock.takeoffTicks >= CarryGate.TAKEOFF_TICKS) {
+            Vector3dc velocity = ship.latestLinearVelocity;
+            SableSafeLanding.LOGGER.info(
+                    "LIVE deck release ship {} reason=takeoff vy={}",
+                    shipId,
+                    fmt(velocity == null ? 0.0 : velocity.y())
+            );
             return false;
         }
         List<SupportMotion> mine = forId(supports, lock.contraptionId);
@@ -404,7 +412,24 @@ public final class CarryRuntime {
                 );
             }
         }
+        if (!lock.confirmed || lock.takeoffTicks > 0) {
+            return true;
+        }
         return place(level, lock, ship, shipId);
+    }
+
+    /**
+     * Advance the takeoff streak from this tick's upward speed relative to the deck.
+     * {@code lastAnchorY} moves with the deck so the next tick is one tick of motion, not the
+     * whole ride since capture.
+     */
+    private static void noteTakeoff(DeckLock lock, ServerSubLevel ship) {
+        net.minecraft.world.phys.Vec3 anchor = lock.contraption.getAnchorVec();
+        double deckUp = (anchor.y - lock.lastAnchorY) * 20.0;
+        lock.lastAnchorY = anchor.y;
+        Vector3dc velocity = ship.latestLinearVelocity;
+        double upward = velocity == null ? 0.0 : velocity.y();
+        lock.takeoffTicks = CarryGate.nextTakeoff(lock.takeoffTicks, upward, deckUp);
     }
 
     private static CarryGate.Reason releaseReason(
@@ -422,19 +447,15 @@ public final class CarryRuntime {
         net.minecraft.world.phys.Vec3 anchor = lock.contraption.getAnchorVec();
         double angle = Math.toRadians(deckAngle(lock.contraption));
         double anchorDelta = distance(anchor.x, anchor.y, anchor.z, lock.lastAnchorX, lock.lastAnchorY, lock.lastAnchorZ);
-        double deckUp = (anchor.y - lock.lastAnchorY) * 20.0;
         lock.idleTicks = CarryGate.nextIdle(lock.idleTicks, anchorDelta, Math.abs(angle - lock.lastAngle));
+        noteTakeoff(lock, ship);
         lock.lastAnchorX = anchor.x;
         lock.lastAnchorY = anchor.y;
         lock.lastAnchorZ = anchor.z;
         lock.lastAngle = angle;
-        Vector3dc velocity = ship.latestLinearVelocity;
-        double upward = velocity == null ? 0.0 : velocity.y();
         List<SupportMotion> mine = forId(supports, lock.contraptionId);
         CarryGate.Contact contact = maintain(ship, mine);
         lock.missTicks = CarryGate.nextMisses(lock.missTicks, contact);
-        boolean clear = clearance(ship, mine) > CarryGate.TAKEOFF_CLEARANCE;
-        lock.takeoffTicks = CarryGate.nextTakeoff(lock.takeoffTicks, upward, deckUp, clear);
         return CarryGate.release(false, false, lock.takeoffTicks, lock.idleTicks, lock.missTicks);
     }
 
@@ -553,25 +574,6 @@ public final class CarryRuntime {
                 anchorZ
         ));
         return true;
-    }
-
-    /** Positive when the hull is above the deck. No horizontal overlap counts as clear. */
-    private static double clearance(ServerSubLevel ship, List<SupportMotion> supports) {
-        if (supports.isEmpty()) {
-            return Double.POSITIVE_INFINITY;
-        }
-        BoundingBox3dc box = ship.boundingBox();
-        Aabb body = new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
-        double best = Double.POSITIVE_INFINITY;
-        boolean overlapped = false;
-        for (SupportMotion support : supports) {
-            if (!body.overlapsHorizontally(support.volume())) {
-                continue;
-            }
-            overlapped = true;
-            best = Math.min(best, box.minY() - support.volume().maxY());
-        }
-        return overlapped ? best : Double.POSITIVE_INFINITY;
     }
 
     /**

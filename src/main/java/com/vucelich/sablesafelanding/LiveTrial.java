@@ -505,6 +505,7 @@ public final class LiveTrial {
             double errLock = sample.held()
                     ? Mth.wrapDegrees((float) ((yawNow - sample.boardedYawDegrees()) - (deckNow - sample.capturedDeckDegrees())))
                     : Double.NaN;
+            log("{} bearing pass errSeat={}", scene.name, fmt(errSeat));
             log("{} yaw dYaw={} dDeck={} errSeat={} errLock={} held={}",
                     scene.name,
                     fmt(yawNow - startYawDeg),
