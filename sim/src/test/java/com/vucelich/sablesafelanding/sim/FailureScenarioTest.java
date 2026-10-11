@@ -165,6 +165,16 @@ class FailureScenarioTest {
     }
 
     @Test
+    void aWideHullIsSampledAcrossTheWholeBottomLayer() {
+        assertEquals(1, RescueSite.columnStride(1, 256));
+        assertEquals(1, RescueSite.columnStride(256, 256));
+        assertEquals(2, RescueSite.columnStride(257, 256));
+        assertEquals(2, RescueSite.columnStride(1024, 256));
+        assertEquals(16, RescueSite.columnStride(256L * 256L, 256));
+        assertEquals(1, RescueSite.columnStride(0, 256));
+    }
+
+    @Test
     void aPortalIsDeferredAndAnotherDimensionIsNotARescueTarget() {
         assertTrue(RescueSite.defer(true));
         assertFalse(RescueSite.defer(false));

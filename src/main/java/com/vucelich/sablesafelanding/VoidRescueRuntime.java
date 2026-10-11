@@ -360,8 +360,9 @@ public final class VoidRescueRuntime {
     private static final int PORTAL_SCAN_CAP = 256;
 
     /**
-     * Portal blocks on the bottom layer of the ship. Unloaded columns are skipped so the check
-     * does not force a chunk load. The walk stops at {@link #PORTAL_SCAN_CAP}.
+     * Portal blocks on the bottom layer of the ship. A wide hull is sampled with
+     * {@code ceil(sqrt(area / 256))} so the reads cover the whole floor. Unloaded columns are
+     * skipped so the check does not force a chunk load. The walk still stops at {@link #PORTAL_SCAN_CAP}.
      */
     private static boolean inPortal(ServerLevel level, Aabb box) {
         if (box == null || !box.finite()) {
@@ -372,10 +373,16 @@ public final class VoidRescueRuntime {
         int minZ = (int) Math.floor(box.minZ());
         int maxX = (int) Math.floor(box.maxX());
         int maxZ = (int) Math.floor(box.maxZ());
+        long width = (long) maxX - minX + 1;
+        long depth = (long) maxZ - minZ + 1;
+        if (width < 1 || depth < 1) {
+            return false;
+        }
+        int stride = RescueSite.columnStride(width * depth, PORTAL_SCAN_CAP);
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         int checked = 0;
-        for (int x = minX; x <= maxX; x++) {
-            for (int z = minZ; z <= maxZ; z++) {
+        for (int x = minX; x <= maxX; x += stride) {
+            for (int z = minZ; z <= maxZ; z += stride) {
                 if (checked++ >= PORTAL_SCAN_CAP) {
                     return false;
                 }

@@ -244,6 +244,39 @@ public final class ColliderFeedRuntime {
         return result instanceof Integer count ? count : 0;
     }
 
+    /** Drops a disassembled or removed contraption so the claim map does not keep it alive. */
+    private static void pruneClaims(String dimension) {
+        List<String> drop = new ArrayList<>();
+        for (Map.Entry<String, AbstractContraptionEntity> entry : CLAIMS.entrySet()) {
+            if (gone(entry.getValue(), dimension)) {
+                drop.add(entry.getKey());
+            }
+        }
+        for (String id : drop) {
+            CLAIMS.remove(id);
+            CLAIMED.remove(id);
+        }
+    }
+
+    private static boolean gone(AbstractContraptionEntity entity, String dimension) {
+        if (entity == null) {
+            return true;
+        }
+        try {
+            if (!(entity.level() instanceof ServerLevel server)
+                    || !server.dimension().location().toString().equals(dimension)) {
+                return false;
+            }
+            if (entity.isRemoved() || !entity.isAlive()) {
+                return true;
+            }
+            Contraption contraption = entity.getContraption();
+            return contraption == null || contraption.getBlocks().isEmpty();
+        } catch (RuntimeException ex) {
+            return true;
+        }
+    }
+
     private static void restoreClaims(String dimension) {
         List<String> ids = new ArrayList<>();
         for (Map.Entry<String, AbstractContraptionEntity> entry : CLAIMS.entrySet()) {
@@ -325,6 +358,7 @@ public final class ColliderFeedRuntime {
     private static void sync(ServerLevel level, PhysicsPipeline pipeline) {
         AntiClipConfig config = SafeLandingConfig.snapshot();
         String dimension = level.dimension().location().toString();
+        pruneClaims(dimension);
         ColliderFeedPlanner planner = PLANNERS.computeIfAbsent(dimension, ignored -> new ColliderFeedPlanner());
         Map<String, FedContraptionCollider> fed = FED.computeIfAbsent(dimension, ignored -> new HashMap<>());
         Map<String, AbstractContraptionEntity> entities = new HashMap<>();

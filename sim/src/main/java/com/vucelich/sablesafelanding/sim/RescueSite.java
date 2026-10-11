@@ -20,6 +20,17 @@ public final class RescueSite {
     }
 
     /**
+     * Columns between samples on a bottom layer of {@code columns} cells, capped near {@code cap} reads.
+     * {@code ceil(sqrt(columns / cap))}, and at least 1 so a tiny hull is read cell by cell.
+     */
+    public static int columnStride(long columns, int cap) {
+        if (columns < 1 || cap < 1) {
+            return 1;
+        }
+        return Math.max(1, (int) Math.ceil(Math.sqrt(columns / (double) cap)));
+    }
+
+    /**
      * Whole-block offsets tried in order. Straight up first, then one block sideways
      * at a few heights, for a last-safe cell that is now solid.
      */
