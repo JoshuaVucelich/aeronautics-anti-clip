@@ -216,6 +216,19 @@ public final class AntiClipStep {
      * step of a small rotation become a velocity of {@code step * 20}. A step past
      * {@link #MAX_RIDE_STEP} is refused so a bad angle cannot fling the ship.
      */
+    /** The support {@link #ride} would use, or null when the ship is not on a platform. */
+    public static SupportMotion ridingSupport(BodyState body, List<SupportMotion> supports, AntiClipConfig config) {
+        for (SupportMotion support : supports) {
+            if (!support.volume().finite() || !support.translation().finite() || !support.pivot().finite() || !support.axis().finite()) {
+                continue;
+            }
+            if (ridingOn(body, support, config)) {
+                return support;
+            }
+        }
+        return null;
+    }
+
     public static BodyState ride(BodyState body, List<SupportMotion> supports, AntiClipConfig config, boolean integrate) {
         for (SupportMotion support : supports) {
             if (!support.volume().finite() || !support.translation().finite() || !support.pivot().finite() || !support.axis().finite()) {

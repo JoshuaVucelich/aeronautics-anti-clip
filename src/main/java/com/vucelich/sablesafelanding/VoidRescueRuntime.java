@@ -24,7 +24,6 @@ import org.joml.Quaterniondc;
 import org.joml.Vector3d;
 import org.joml.Vector3dc;
 
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -39,18 +38,7 @@ public final class VoidRescueRuntime {
     private static final RateLimiter RESCUE_LOGS = new RateLimiter(5_000_000_000L);
     private static final RateLimiter BEDROCK_LOGS = new RateLimiter(5_000_000_000L);
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
-    /**
-     * Where a resting ship started this game tick, and the capped platform step for the whole tick.
-     * Post-physics places the ship at {@code start + step * partial}. Rapier is not given that
-     * velocity: a kinematic floor cancels a downward component, and integrating it as well as the
-     * placement would move the ship twice on the way up or around a bearing.
-     */
-    private static final Map<String, PlatformFollow> FOLLOWS = new HashMap<>();
-
-    private record PlatformFollow(long time, Vec3 start, Vec3 step) {
-    }
     private static boolean removalHookSeen;
-    private static boolean loggedCatch;
     private static boolean loggedThread;
     private static int ticksWithShipsBeforeHook;
 
@@ -67,13 +55,10 @@ public final class VoidRescueRuntime {
 
     public static void clear() {
         STEP.clear();
-        FOLLOWS.clear();
     }
 
     public static void forgetDimension(String dimension) {
         STEP.forgetDimension(dimension);
-        String prefix = dimension + "\u0000";
-        FOLLOWS.keySet().removeIf(key -> key.startsWith(prefix));
     }
 
     private VoidRescueRuntime() {
@@ -245,15 +230,6 @@ public final class VoidRescueRuntime {
         if (!after.rescued()) {
             Vector3d desired = new Vector3d(after.velocity().x(), after.velocity().y(), after.velocity().z());
             if (slowed) {
-                String key = subLevel.getLevel().dimension().location().toString() + "\u0000" + subLevel.getUniqueId();
-                PlatformFollow existing = FOLLOWS.get(key);
-                if (existing == null || existing.time != time) {
-                    FOLLOWS.put(key, new PlatformFollow(
-                            time,
-                            before.position(),
-                            after.velocity().mul(1.0 / 20.0)
-                    ));
-                }
                 PlatformTrace.note("ride:" + subLevel.getUniqueId(),
                         String.format(java.util.Locale.ROOT, "vel=(%.2f,%.2f,%.2f) shipMinY=%.2f",
                                 desired.x, desired.y, desired.z, before.bounds().minY()));
@@ -263,71 +239,6 @@ public final class VoidRescueRuntime {
         subLevel.updateBoundingBox();
         if (after.rescued()) {
             logRescue(subLevel.getUniqueId(), before, after);
-        }
-    }
-
-    /**
-     * Put a resting ship on the platform pose this substep is about to solve. The kinematic
-     * collider is uploaded from the same partial at the start of the solve, so the car and the
-     * deck arrive together. A placement after the solve is pushed back out of the deck.
-     */
-    public static void catchUp(ServerLevel level, PhysicsPipeline pipeline, double partial) {
-        if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
-            return;
-        }
-        String dimension = level.dimension().location().toString();
-        long time = level.getGameTime();
-        double fraction = Math.max(0.0, Math.min(1.0, partial));
-        for (ServerSubLevel subLevel : container.getAllSubLevels()) {
-            if (subLevel.isRemoved()) {
-                continue;
-            }
-            String key = dimension + "\u0000" + subLevel.getUniqueId();
-            PlatformFollow follow = FOLLOWS.get(key);
-            if (follow == null || follow.time != time || follow.step.lengthSquared() < 1.0e-18) {
-                continue;
-            }
-            Vec3 target = follow.start.add(follow.step.mul(fraction));
-            Vector3dc current = subLevel.logicalPose().position();
-            double dx = target.x() - current.x();
-            double dy = target.y() - current.y();
-            double dz = target.z() - current.z();
-            if (dx * dx + dy * dy + dz * dz > 1.0e-12) {
-                Quaterniond orientation = new Quaterniond(subLevel.logicalPose().orientation());
-                Vector3d position = new Vector3d(target.x(), target.y(), target.z());
-                if (pipeline != null) {
-                    try {
-                        pipeline.wakeUp(subLevel);
-                        pipeline.teleport(subLevel, position, orientation);
-                        pipeline.resetVelocity(subLevel);
-                    } catch (RuntimeException ex) {
-                        subLevel.logicalPose().position().set(position);
-                        logFailure(ex);
-                    }
-                } else {
-                    subLevel.logicalPose().position().set(position);
-                }
-                subLevel.updateBoundingBox();
-                if (!loggedCatch) {
-                    loggedCatch = true;
-                    SableSafeLanding.LOGGER.info(
-                            "LIVE catch partial={} step=({},{},{}) shipY {} -> {}",
-                            String.format(java.util.Locale.ROOT, "%.2f", fraction),
-                            String.format(java.util.Locale.ROOT, "%.3f", follow.step.x()),
-                            String.format(java.util.Locale.ROOT, "%.3f", follow.step.y()),
-                            String.format(java.util.Locale.ROOT, "%.3f", follow.step.z()),
-                            String.format(java.util.Locale.ROOT, "%.2f", current.y()),
-                            String.format(java.util.Locale.ROOT, "%.2f", target.y())
-                    );
-                }
-            } else if (pipeline != null) {
-                try {
-                    pipeline.resetVelocity(subLevel);
-                } catch (RuntimeException ex) {
-                    logFailure(ex);
-                }
-            }
-            subLevel.latestLinearVelocity.set(follow.step.x() * 20.0, follow.step.y() * 20.0, follow.step.z() * 20.0);
         }
     }
 
