@@ -7,6 +7,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.level.ChunkEvent;
 import net.neoforged.neoforge.event.level.LevelEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import org.slf4j.Logger;
@@ -23,12 +24,25 @@ public final class SableSafeLanding {
         NeoForge.EVENT_BUS.addListener(ColliderFeedRuntime::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(CarryRuntime::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(CarryRuntime::onServerTick);
+        NeoForge.EVENT_BUS.addListener(AntiClipCommand::register);
+        NeoForge.EVENT_BUS.addListener(SableSafeLanding::onChunkUnload);
         NeoForge.EVENT_BUS.addListener(SableSafeLanding::onUnload);
         NeoForge.EVENT_BUS.addListener(SableSafeLanding::onStop);
         if (LiveTrial.enabled()) {
             NeoForge.EVENT_BUS.addListener(LiveTrial::onTick);
         }
         LOGGER.info("Aeronautics Anti-Clip {} loaded", SafeLandingConfig.VERSION);
+    }
+
+    private static void onChunkUnload(ChunkEvent.Unload event) {
+        if (!(event.getLevel() instanceof ServerLevel level) || !level.getServer().isSameThread()) {
+            return;
+        }
+        try {
+            CarryRuntime.dropChunk(level, event.getChunk().getPos());
+        } catch (RuntimeException ex) {
+            LOGGER.warn("Carry unload failed: {}", ex.toString());
+        }
     }
 
     private static void onUnload(LevelEvent.Unload event) {

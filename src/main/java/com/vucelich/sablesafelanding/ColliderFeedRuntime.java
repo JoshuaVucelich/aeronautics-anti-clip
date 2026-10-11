@@ -125,7 +125,8 @@ public final class ColliderFeedRuntime {
 
     public static boolean shouldOwn(AbstractContraptionEntity entity) {
         try {
-            return isWorldSupport(entity) && SafeLandingConfig.snapshot().feedColliders();
+            AntiClipConfig config = SafeLandingConfig.snapshot();
+            return config.enabled() && config.feedColliders() && isWorldSupport(entity);
         } catch (RuntimeException ex) {
             return false;
         }
@@ -155,10 +156,48 @@ public final class ColliderFeedRuntime {
             return;
         }
         try {
+            if (!SafeLandingConfig.snapshot().enabled()) {
+                disarm(level);
+                return;
+            }
             sync(level, system.getPipeline());
         } catch (RuntimeException ex) {
             logFailure(ex);
         }
+    }
+
+    /**
+     * Drops colliders this mod added in one level. Used by the master switch.
+     * Claims for those ids are released so Sable's own collider is no longer suppressed.
+     */
+    public static void disarm(ServerLevel level) {
+        try {
+            String dimension = level.dimension().location().toString();
+            SubLevelPhysicsSystem system = SubLevelPhysicsSystem.get(level);
+            PhysicsPipeline pipeline = system == null ? null : system.getPipeline();
+            Map<String, FedContraptionCollider> fed = FED.remove(dimension);
+            if (fed == null) {
+                return;
+            }
+            for (Map.Entry<String, FedContraptionCollider> entry : fed.entrySet()) {
+                CLAIMED.remove(entry.getKey());
+                HOOKED.remove(entry.getKey());
+                if (pipeline != null && entry.getValue() != null) {
+                    try {
+                        pipeline.remove(entry.getValue());
+                    } catch (RuntimeException ex) {
+                        logFailure(ex);
+                    }
+                }
+            }
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+        }
+    }
+
+    /** Forgets every claim so a killed switch cannot keep suppressing Sable. */
+    public static void releaseClaims() {
+        CLAIMED.clear();
     }
 
     private static void sync(ServerLevel level, PhysicsPipeline pipeline) {

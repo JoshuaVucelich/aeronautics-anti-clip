@@ -45,8 +45,18 @@ public final class CarryGate {
         NONE, RESTING, INCONCLUSIVE
     }
 
+    /** One tick of deck travel, in blocks, past which a placement is a spike and is not applied. */
+    public static final double MAX_TICK_TRAVEL = 4.0;
+    /** One tick of bearing travel, in radians, past which a placement is a spike. Ninety degrees. */
+    public static final double MAX_TICK_ANGLE = Math.toRadians(90.0);
+    /**
+     * Physics substep, in seconds, past which the ride velocity is not written.
+     * Sable's substep is {@code 1/20/substeps}. The default of 2 is 0.025 seconds.
+     */
+    public static final double LAG_STEP_SECONDS = 0.25;
+
     public enum Reason {
-        NOCONTACT, DISASSEMBLED, IDLE, TAKEOFF, PILOT
+        NOCONTACT, DISASSEMBLED, IDLE, TAKEOFF, PILOT, UNLOADED, SPIKE
     }
 
     private CarryGate() {
@@ -108,11 +118,34 @@ public final class CarryGate {
             int idleTicks,
             int missTicks
     ) {
+        return release(disassembled, piloting, takeoffTicks, idleTicks, missTicks, false, false);
+    }
+
+    /**
+     * {@code unloaded} is a chunk unload, a restart drop, or a ship that is no longer in this
+     * level. It wins over disassembly, because an unloading chunk also marks the entity removed.
+     * {@code spiked} is one tick of motion past {@link #safeStep}.
+     */
+    public static Reason release(
+            boolean disassembled,
+            boolean piloting,
+            int takeoffTicks,
+            int idleTicks,
+            int missTicks,
+            boolean unloaded,
+            boolean spiked
+    ) {
+        if (unloaded) {
+            return Reason.UNLOADED;
+        }
         if (disassembled) {
             return Reason.DISASSEMBLED;
         }
         if (piloting) {
             return Reason.PILOT;
+        }
+        if (spiked) {
+            return Reason.SPIKE;
         }
         if (takeoffTicks >= TAKEOFF_TICKS) {
             return Reason.TAKEOFF;
@@ -124,6 +157,20 @@ public final class CarryGate {
             return Reason.NOCONTACT;
         }
         return null;
+    }
+
+    /** A placement of this size is still a ride. A larger one is refused. */
+    public static boolean safeStep(double distance, double angleRadians) {
+        return Double.isFinite(distance)
+                && Double.isFinite(angleRadians)
+                && distance >= 0.0
+                && distance <= MAX_TICK_TRAVEL
+                && Math.abs(angleRadians) <= MAX_TICK_ANGLE;
+    }
+
+    /** True when this physics substep is too long to trust a ride velocity. */
+    public static boolean lagSpike(double timeStepSeconds) {
+        return !Double.isFinite(timeStepSeconds) || timeStepSeconds < 0.0 || timeStepSeconds > LAG_STEP_SECONDS;
     }
 
     public static int nextIdle(int idleTicks, double anchorDelta, double angleDeltaRadians) {
@@ -144,6 +191,8 @@ public final class CarryGate {
             case IDLE -> "idle";
             case TAKEOFF -> "takeoff";
             case PILOT -> "pilot";
+            case UNLOADED -> "unloaded";
+            case SPIKE -> "spike";
         };
     }
 }

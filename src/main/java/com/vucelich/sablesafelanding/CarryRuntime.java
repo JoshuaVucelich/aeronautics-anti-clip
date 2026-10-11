@@ -8,7 +8,10 @@ import com.vucelich.sablesafelanding.sim.AabbMerger;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import com.vucelich.sablesafelanding.sim.AntiClipStep;
 import com.vucelich.sablesafelanding.sim.CarryBroadphase;
+import com.vucelich.sablesafelanding.sim.CarryBudget;
 import com.vucelich.sablesafelanding.sim.CarryGate;
+import com.vucelich.sablesafelanding.sim.NestedCarry;
+import com.vucelich.sablesafelanding.sim.VelocityClamp;
 import com.vucelich.sablesafelanding.sim.DeckContact;
 import com.vucelich.sablesafelanding.sim.DeckFollow;
 import com.vucelich.sablesafelanding.sim.RateLimiter;
@@ -24,6 +27,7 @@ import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
@@ -82,7 +86,10 @@ public final class CarryRuntime {
     private static final Map<String, CachedSupports> SUPPORT_CACHE = new HashMap<>();
     private static final Map<String, CachedSupports> BLOCK_CACHE = new HashMap<>();
     private static final Set<String> PLACEMENT_LOGGED = new HashSet<>();
+    private static final RateLimiter LAG_LOGS = new RateLimiter(5_000_000_000L);
     private static final Field JUMPING = jumpingField();
+    /** Rotates which unlocked ships are examined so a long list is not stuck on the first 32. */
+    private static int captureCursor;
 
     /**
      * Deck-frame offset and boarding orientation, captured once contact has held.
@@ -115,6 +122,9 @@ public final class CarryRuntime {
         /** Log body velocity against the pose delta once, on the tick after the first teleport. */
         private boolean pendingVelocityLog;
         private boolean velocityLogged;
+        private double placedPivotX;
+        private double placedPivotY;
+        private double placedPivotZ;
 
         private DeckLock(
                 AbstractContraptionEntity contraption,
@@ -146,6 +156,9 @@ public final class CarryRuntime {
             this.lastAnchorZ = anchorZ;
             this.lastAngle = capturedAngle;
             this.lastPlacedAngle = capturedAngle;
+            this.placedPivotX = anchorX + 0.5;
+            this.placedPivotY = anchorY + 0.5;
+            this.placedPivotZ = anchorZ + 0.5;
             this.contactTicks = 1;
         }
     }
@@ -183,11 +196,19 @@ public final class CarryRuntime {
         }
         try {
             AntiClipConfig config = SafeLandingConfig.snapshot();
+            if (!config.enabled()) {
+                LOCKS.clear();
+                return;
+            }
             if (!config.carry() && !config.sweep() && !config.feedColliders()) {
                 return;
             }
-            List<SupportMotion> supports = supportsFor(level);
-            if (supports.isEmpty()) {
+            boolean lag = CarryGate.lagSpike(event.getTimeStep());
+            List<SupportMotion> supports = lag ? List.of() : supportsFor(level);
+            if (lag) {
+                logLag(event.getTimeStep());
+            }
+            if (supports.isEmpty() && (!lag || (!config.voidRescue() && !config.bedrockRescue()))) {
                 return;
             }
             if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
@@ -216,7 +237,7 @@ public final class CarryRuntime {
         }
         try {
             AntiClipConfig config = SafeLandingConfig.snapshot();
-            if (!config.carry()) {
+            if (!config.enabled() || !config.carry()) {
                 LOCKS.clear();
                 return;
             }
@@ -234,6 +255,7 @@ public final class CarryRuntime {
         SUPPORT_CACHE.clear();
         BLOCK_CACHE.clear();
         PLACEMENT_LOGGED.clear();
+        captureCursor = 0;
     }
 
     public static void forgetDimension(String dimension) {
@@ -288,7 +310,8 @@ public final class CarryRuntime {
             DeckLock lock = entry.getValue();
             String shipId = entry.getKey().substring(prefix.length());
             ServerSubLevel ship = lock.ship;
-            if (ship == null || ship.isRemoved()) {
+            if (ship == null || ship.isRemoved() || ship.getLevel() != level || !chunkLoaded(level, ship)) {
+                SableSafeLanding.LOGGER.info("LIVE deck release ship {} reason=unloaded", shipId);
                 drop.add(entry.getKey());
                 continue;
             }
@@ -328,14 +351,34 @@ public final class CarryRuntime {
         for (String key : drop) {
             LOCKS.remove(key);
         }
+        List<ServerSubLevel> unlocked = new ArrayList<>();
         for (ServerSubLevel ship : container.getAllSubLevels()) {
-            if (ship.isRemoved() || piloting(level, ship)) {
+            if (ship.isRemoved() || piloting(level, ship) || ship.getLevel() != level) {
                 continue;
             }
             String key = prefix + ship.getUniqueId();
             if (LOCKS.containsKey(key)) {
                 continue;
             }
+            unlocked.add(ship);
+        }
+        int held = 0;
+        for (String key : LOCKS.keySet()) {
+            if (key.startsWith(prefix)) {
+                held++;
+            }
+        }
+        int start = CarryBudget.windowStart(unlocked.size(), captureCursor, CarryBudget.MAX_SHIPS);
+        int examined = 0;
+        for (int i = 0; unlocked.size() > 0 && examined < CarryBudget.MAX_SHIPS; i++) {
+            if (!CarryBudget.admit(held, examined)) {
+                break;
+            }
+            if (i >= unlocked.size()) {
+                break;
+            }
+            ServerSubLevel ship = unlocked.get((start + i) % unlocked.size());
+            examined++;
             Aabb hull = shipBox(ship);
             if (hull == null) {
                 continue;
@@ -365,9 +408,15 @@ public final class CarryRuntime {
                 }
                 // The first resting tick starts a provisional lock. It is not placed until contact
                 // has held for the confirm. A miss before that drops it.
-                capture(level, dimension, ship, key, touch.supportId());
+                String key = prefix + ship.getUniqueId();
+                if (capture(level, dimension, ship, key, touch.supportId())) {
+                    held++;
+                }
                 break;
             }
+        }
+        if (unlocked.size() > CarryBudget.MAX_SHIPS) {
+            captureCursor = start + examined;
         }
     }
 
@@ -384,7 +433,12 @@ public final class CarryRuntime {
             String shipId,
             List<SupportMotion> supports
     ) {
+        if (ship.getLevel() != level || !chunkLoaded(level, ship) || contraptionUnloaded(level, lock.contraption)) {
+            SableSafeLanding.LOGGER.info("LIVE deck release ship {} reason=unloaded", shipId);
+            return false;
+        }
         if (disassembled(lock.contraption)) {
+            calmIfAbsurd(level, ship);
             SableSafeLanding.LOGGER.info("LIVE deck release ship {} reason=disassembled", shipId);
             return false;
         }
@@ -515,7 +569,11 @@ public final class CarryRuntime {
             ServerSubLevel ship,
             List<SupportMotion> supports
     ) {
+        if (ship.getLevel() != level || !chunkLoaded(level, ship) || contraptionUnloaded(level, lock.contraption)) {
+            return CarryGate.Reason.UNLOADED;
+        }
         if (disassembled(lock.contraption)) {
+            calmIfAbsurd(level, ship);
             return CarryGate.Reason.DISASSEMBLED;
         }
         if (piloting(level, ship)) {
@@ -571,9 +629,22 @@ public final class CarryRuntime {
         double dx = target.x() - from.x();
         double dy = target.y() - from.y();
         double dz = target.z() - from.z();
-        if (!CarryGate.teleport(dx * dx + dy * dy + dz * dz, angle - lock.lastPlacedAngle)) {
+        double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        double angleStep = angle - lock.lastPlacedAngle;
+        if (!CarryGate.teleport(dx * dx + dy * dy + dz * dz, angleStep)) {
             return true;
         }
+        if (!CarryGate.safeStep(distance, angleStep)) {
+            calmIfAbsurd(level, ship);
+            SableSafeLanding.LOGGER.info(
+                    "LIVE deck release ship {} reason=spike d={} angle={}",
+                    shipId,
+                    fmt(distance),
+                    fmt(Math.toDegrees(angleStep))
+            );
+            return false;
+        }
+        Vec3 oldPivot = new Vec3(lock.placedPivotX, lock.placedPivotY, lock.placedPivotZ);
         Rot boarded = new Rot(lock.orientationX, lock.orientationY, lock.orientationZ, lock.orientationW);
         Rot turned = DeckFollow.orientation(boarded, lock.axis, lock.capturedAngle, angle);
         Quaterniond orientation = new Quaterniond(turned.x(), turned.y(), turned.z(), turned.w());
@@ -589,7 +660,11 @@ public final class CarryRuntime {
             ship.logicalPose().orientation().set(orientation);
         }
         ship.updateLastPose();
+        shiftPassengers(level, ship, lock, oldPivot, pivot, angleStep);
         lock.lastPlacedAngle = angle;
+        lock.placedPivotX = pivot.x();
+        lock.placedPivotY = pivot.y();
+        lock.placedPivotZ = pivot.z();
         if (!lock.velocityLogged) {
             lock.pendingVelocityLog = true;
         }
@@ -1016,6 +1091,182 @@ public final class CarryRuntime {
             case Y -> new Vec3(0.0, 1.0, 0.0);
             case Z -> new Vec3(0.0, 0.0, 1.0);
         };
+    }
+
+    public static int lockCount() {
+        return LOCKS.size();
+    }
+
+    public static int heldCount() {
+        int held = 0;
+        for (DeckLock lock : LOCKS.values()) {
+            if (lock.confirmed) {
+                held++;
+            }
+        }
+        return held;
+    }
+
+    /** Drops locks whose ship or deck lives in this chunk. Does not teleport. */
+    public static void dropChunk(ServerLevel level, ChunkPos pos) {
+        if (pos == null) {
+            return;
+        }
+        String prefix = level.dimension().location().toString() + "\0";
+        List<String> drop = new ArrayList<>();
+        for (Map.Entry<String, DeckLock> entry : LOCKS.entrySet()) {
+            if (!entry.getKey().startsWith(prefix)) {
+                continue;
+            }
+            DeckLock lock = entry.getValue();
+            if (shipInChunk(lock.ship, pos) || entityInChunk(lock.contraption, pos)) {
+                SableSafeLanding.LOGGER.info(
+                        "LIVE deck release ship {} reason=unloaded",
+                        entry.getKey().substring(prefix.length())
+                );
+                drop.add(entry.getKey());
+            }
+        }
+        for (String key : drop) {
+            LOCKS.remove(key);
+        }
+    }
+
+    private static boolean shipInChunk(ServerSubLevel ship, ChunkPos pos) {
+        if (ship == null || ship.logicalPose() == null || ship.logicalPose().position() == null) {
+            return false;
+        }
+        Vector3dc position = ship.logicalPose().position();
+        int x = net.minecraft.util.Mth.floor(position.x()) >> 4;
+        int z = net.minecraft.util.Mth.floor(position.z()) >> 4;
+        return x == pos.x && z == pos.z;
+    }
+
+    private static boolean entityInChunk(AbstractContraptionEntity entity, ChunkPos pos) {
+        return entity != null && entity.chunkPosition().equals(pos);
+    }
+
+    private static boolean chunkLoaded(ServerLevel level, ServerSubLevel ship) {
+        Vector3dc position = ship.logicalPose().position();
+        if (position == null || !Double.isFinite(position.x()) || !Double.isFinite(position.y()) || !Double.isFinite(position.z())) {
+            return false;
+        }
+        return level.isLoaded(BlockPos.containing(position.x(), position.y(), position.z()));
+    }
+
+    private static boolean contraptionUnloaded(ServerLevel level, AbstractContraptionEntity entity) {
+        if (entity == null) {
+            return false;
+        }
+        if (entity.level() != level) {
+            return true;
+        }
+        return !level.isLoaded(entity.blockPosition());
+    }
+
+    private static void calmIfAbsurd(ServerLevel level, ServerSubLevel ship) {
+        Vector3d body = new Vector3d();
+        PhysicsPipeline pipeline = pipeline(level);
+        if (pipeline != null) {
+            try {
+                Vector3d read = pipeline.getLinearVelocity(ship, body);
+                if (read != null) {
+                    body = read;
+                }
+            } catch (RuntimeException ex) {
+                logFailure(ex);
+            }
+        }
+        Vector3dc pose = ship.latestLinearVelocity;
+        Vec3 bodyVec = new Vec3(body.x, body.y, body.z);
+        Vec3 poseVec = pose == null ? Vec3.ZERO : new Vec3(pose.x(), pose.y(), pose.z());
+        if (VelocityClamp.calm(bodyVec) == bodyVec && VelocityClamp.calm(poseVec) == poseVec) {
+            return;
+        }
+        if (pipeline != null) {
+            try {
+                pipeline.resetVelocity(ship);
+            } catch (RuntimeException ex) {
+                logFailure(ex);
+            }
+        }
+        ship.latestLinearVelocity.zero();
+        ship.latestAngularVelocity.zero();
+        double speed = Math.max(bodyVec.finite() ? bodyVec.length() : 0.0, poseVec.finite() ? poseVec.length() : 0.0);
+        SableSafeLanding.LOGGER.info("LIVE deck calm ship {} speed={}", ship.getUniqueId(), fmt(speed));
+    }
+
+    /**
+     * Moves a car that is sitting on a carried ship by the same pivot motion.
+     * A child with its own lock is left to that lock. A step past the spike cap is skipped.
+     */
+    private static void shiftPassengers(
+            ServerLevel level,
+            ServerSubLevel parent,
+            DeckLock lock,
+            Vec3 oldPivot,
+            Vec3 pivot,
+            double angleStep
+    ) {
+        if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
+            return;
+        }
+        Aabb hull = shipBox(parent);
+        if (hull == null || !oldPivot.finite() || !pivot.finite()) {
+            return;
+        }
+        Set<String> locked = new HashSet<>();
+        for (DeckLock held : LOCKS.values()) {
+            if (held.ship != null) {
+                locked.add(held.ship.getUniqueId().toString());
+            }
+        }
+        int moved = 0;
+        for (ServerSubLevel child : container.getAllSubLevels()) {
+            if (child == parent || child.isRemoved() || child.getLevel() != level || piloting(level, child)) {
+                continue;
+            }
+            if (locked.contains(child.getUniqueId().toString())) {
+                continue;
+            }
+            Aabb box = shipBox(child);
+            if (!NestedCarry.passenger(hull, box)) {
+                continue;
+            }
+            if (moved >= NestedCarry.MAX_PASSENGERS) {
+                break;
+            }
+            Vector3dc position = child.logicalPose().position();
+            Vec3 childPos = new Vec3(position.x(), position.y(), position.z());
+            Vec3 childTarget = childPos.sub(oldPivot).rotate(lock.axis, angleStep).add(pivot);
+            if (!childTarget.finite() || !CarryGate.safeStep(childPos.sub(childTarget).length(), angleStep)) {
+                continue;
+            }
+            shiftBody(level, child, childTarget);
+            moved++;
+        }
+    }
+
+    private static void shiftBody(ServerLevel level, ServerSubLevel child, Vec3 target) {
+        Quaterniondc orientation = child.logicalPose().orientation();
+        Quaterniond copy = new Quaterniond(orientation);
+        Vector3d position = new Vector3d(target.x(), target.y(), target.z());
+        PhysicsPipeline pipeline = pipeline(level);
+        if (pipeline != null) {
+            pipeline.wakeUp(child);
+            pipeline.teleport(child, position, copy);
+        } else {
+            child.logicalPose().position().set(position);
+        }
+        child.updateLastPose();
+        child.updateBoundingBox();
+    }
+
+    private static void logLag(double timeStep) {
+        if (!LAG_LOGS.tryAcquire(System.nanoTime())) {
+            return;
+        }
+        SableSafeLanding.LOGGER.info("Skipping ride velocity for a {}s physics step", fmt(timeStep));
     }
 
     private static void logFailure(RuntimeException ex) {

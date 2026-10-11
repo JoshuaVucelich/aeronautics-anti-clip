@@ -19,7 +19,8 @@ public record AntiClipConfig(
         int maxPairChecks,
         boolean bedrockRescue,
         double bedrockMargin,
-        int bedrockTicks
+        int bedrockTicks,
+        boolean enabled
 ) {
     public AntiClipConfig {
         if (approachMargin < 0.0 || safeClearance < 0.0 || maxPenetration < 0.0 || restEpsilon < 0.0 || bedrockMargin < 0.0) {
@@ -52,49 +53,56 @@ public record AntiClipConfig(
                 4096,
                 true,
                 32.0,
-                40
+                40,
+                true
         );
     }
 
     public AntiClipConfig withVoidRescue(boolean enabled) {
         return new AntiClipConfig(enabled, feedColliders, carry, sweep, approachMargin, safeClearance,
                 maxPenetration, restEpsilon, stableFallSpeed, gravity, spatialCell, maxPairChecks,
-                bedrockRescue, bedrockMargin, bedrockTicks);
+                bedrockRescue, bedrockMargin, bedrockTicks, this.enabled);
     }
 
-    public AntiClipConfig withFeedColliders(boolean enabled) {
-        return new AntiClipConfig(voidRescue, enabled, carry, sweep, approachMargin, safeClearance,
+    public AntiClipConfig withFeedColliders(boolean on) {
+        return new AntiClipConfig(voidRescue, on, carry, sweep, approachMargin, safeClearance,
                 maxPenetration, restEpsilon, stableFallSpeed, gravity, spatialCell, maxPairChecks,
-                bedrockRescue, bedrockMargin, bedrockTicks);
+                bedrockRescue, bedrockMargin, bedrockTicks, enabled);
     }
 
-    public AntiClipConfig withCarry(boolean enabled) {
-        return new AntiClipConfig(voidRescue, feedColliders, enabled, sweep, approachMargin, safeClearance,
+    public AntiClipConfig withCarry(boolean on) {
+        return new AntiClipConfig(voidRescue, feedColliders, on, sweep, approachMargin, safeClearance,
                 maxPenetration, restEpsilon, stableFallSpeed, gravity, spatialCell, maxPairChecks,
-                bedrockRescue, bedrockMargin, bedrockTicks);
+                bedrockRescue, bedrockMargin, bedrockTicks, enabled);
     }
 
-    public AntiClipConfig withSweep(boolean enabled) {
-        return new AntiClipConfig(voidRescue, feedColliders, carry, enabled, approachMargin, safeClearance,
+    public AntiClipConfig withSweep(boolean on) {
+        return new AntiClipConfig(voidRescue, feedColliders, carry, on, approachMargin, safeClearance,
                 maxPenetration, restEpsilon, stableFallSpeed, gravity, spatialCell, maxPairChecks,
-                bedrockRescue, bedrockMargin, bedrockTicks);
+                bedrockRescue, bedrockMargin, bedrockTicks, enabled);
     }
 
-    public AntiClipConfig withBedrockRescue(boolean enabled) {
+    public AntiClipConfig withBedrockRescue(boolean on) {
         return new AntiClipConfig(voidRescue, feedColliders, carry, sweep, approachMargin, safeClearance,
                 maxPenetration, restEpsilon, stableFallSpeed, gravity, spatialCell, maxPairChecks,
-                enabled, bedrockMargin, bedrockTicks);
+                on, bedrockMargin, bedrockTicks, enabled);
     }
 
     public AntiClipConfig withBedrockMargin(double margin) {
         return new AntiClipConfig(voidRescue, feedColliders, carry, sweep, approachMargin, safeClearance,
                 maxPenetration, restEpsilon, stableFallSpeed, gravity, spatialCell, maxPairChecks,
-                bedrockRescue, margin, bedrockTicks);
+                bedrockRescue, margin, bedrockTicks, enabled);
     }
 
     public AntiClipConfig withBedrockTicks(int ticks) {
         return new AntiClipConfig(voidRescue, feedColliders, carry, sweep, approachMargin, safeClearance,
                 maxPenetration, restEpsilon, stableFallSpeed, gravity, spatialCell, maxPairChecks,
-                bedrockRescue, bedrockMargin, ticks);
+                bedrockRescue, bedrockMargin, ticks, enabled);
+    }
+
+    public AntiClipConfig withEnabled(boolean on) {
+        return new AntiClipConfig(voidRescue, feedColliders, carry, sweep, approachMargin, safeClearance,
+                maxPenetration, restEpsilon, stableFallSpeed, gravity, spatialCell, maxPairChecks,
+                bedrockRescue, bedrockMargin, bedrockTicks, on);
     }
 }

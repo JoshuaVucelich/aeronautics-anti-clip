@@ -2,6 +2,9 @@ package com.vucelich.sablesafelanding.mixin;
 
 import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.vucelich.sablesafelanding.ColliderFeedRuntime;
+import com.vucelich.sablesafelanding.SableSafeLanding;
+import com.vucelich.sablesafelanding.SafeLandingConfig;
+import com.vucelich.sablesafelanding.sim.FailureGuards;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -25,6 +28,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(value = AbstractContraptionEntity.class, priority = 1100, remap = false)
 public abstract class ContraptionInitializeMixin {
+    private static boolean loggedFailure;
+
     @Inject(
             method = "tick",
             at = @At(
@@ -37,6 +42,15 @@ public abstract class ContraptionInitializeMixin {
             remap = false
     )
     private void sableSafeLanding$afterSableInit(CallbackInfo ci) {
+        if (!FailureGuards.run(this::afterSable)) {
+            logHookFailure();
+        }
+    }
+
+    private void afterSable() {
+        if (!SafeLandingConfig.running()) {
+            return;
+        }
         AbstractContraptionEntity entity = (AbstractContraptionEntity) (Object) this;
         ColliderFeedRuntime.noteHook(entity);
         if (ColliderFeedRuntime.shouldOwn(entity)) {
@@ -47,9 +61,26 @@ public abstract class ContraptionInitializeMixin {
 
     @Inject(method = "sable$shouldCollide", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
     private void sableSafeLanding$suppressSableCollider(CallbackInfoReturnable<Boolean> ci) {
+        if (!FailureGuards.run(() -> suppress(ci))) {
+            logHookFailure();
+        }
+    }
+
+    private void suppress(CallbackInfoReturnable<Boolean> ci) {
+        if (!SafeLandingConfig.running()) {
+            return;
+        }
         AbstractContraptionEntity entity = (AbstractContraptionEntity) (Object) this;
         if (ColliderFeedRuntime.isClaimed(entity.getUUID().toString())) {
             ci.setReturnValue(false);
         }
+    }
+
+    private static void logHookFailure() {
+        if (loggedFailure) {
+            return;
+        }
+        loggedFailure = true;
+        SableSafeLanding.LOGGER.warn("Contraption hook failed; leaving Sable's collider path alone");
     }
 }

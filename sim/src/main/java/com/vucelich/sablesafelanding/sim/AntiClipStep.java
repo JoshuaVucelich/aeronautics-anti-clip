@@ -143,8 +143,8 @@ public final class AntiClipStep {
         boolean poseValid = body.position().finite() && body.bounds().finite() && body.orientation().finite();
         if (!poseValid) {
             PoseSnapshot saved = tracker.get(dimension, body.id());
-            if (tracker.usable(saved, body, world, time)) {
-                return new BodyState(body.id(), saved.position(), Vec3.ZERO, saved.bounds(), saved.orientation(), true);
+                if (tracker.usable(saved, body, world, time)) {
+                return new BodyState(body.id(), saved.position(), VelocityClamp.afterRescue(body.velocity()), saved.bounds(), saved.orientation(), true);
             }
             return body.withRescued(false);
         }
@@ -163,7 +163,7 @@ public final class AntiClipStep {
         return new BodyState(
                 body.id(),
                 body.position().add(delta),
-                Vec3.ZERO,
+                VelocityClamp.afterRescue(body.velocity()),
                 body.bounds().translate(delta),
                 body.orientation(),
                 true
@@ -195,7 +195,7 @@ public final class AntiClipStep {
             return null;
         }
         bedrockSince.remove(key);
-        return new BodyState(body.id(), saved.position(), Vec3.ZERO, saved.bounds(), saved.orientation(), true);
+        return new BodyState(body.id(), saved.position(), VelocityClamp.afterRescue(body.velocity()), saved.bounds(), saved.orientation(), true);
     }
 
     /** Upward speed, in blocks per second, that means the ship is leaving the platform. */

@@ -1,6 +1,8 @@
 package com.vucelich.sablesafelanding.mixin;
 
+import com.vucelich.sablesafelanding.SableSafeLanding;
 import com.vucelich.sablesafelanding.VoidRescueRuntime;
+import com.vucelich.sablesafelanding.sim.FailureGuards;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
@@ -17,6 +19,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(value = ServerSubLevel.class, remap = false)
 public abstract class ServerSubLevelMixin {
+    private static boolean loggedFailure;
+
     /**
      * Sable 2.0.3's {@code ServerSubLevel.tick} invokes {@code ServerSubLevel.updateBoundingBox()V}
      * (the method is declared on {@code SubLevel}, but the constant-pool owner is the subclass).
@@ -52,6 +56,15 @@ public abstract class ServerSubLevelMixin {
     }
 
     private void rescue(CallbackInfo ci) {
+        if (!FailureGuards.run(this::rescueNow)) {
+            if (!loggedFailure) {
+                loggedFailure = true;
+                SableSafeLanding.LOGGER.warn("Removal hook failed; leaving Sable's deletion check alone");
+            }
+        }
+    }
+
+    private void rescueNow() {
         VoidRescueRuntime.noteRemovalHook();
         ServerSubLevel subLevel = (ServerSubLevel) (Object) this;
         SubLevelPhysicsSystem system = SubLevelPhysicsSystem.get(subLevel.getLevel());

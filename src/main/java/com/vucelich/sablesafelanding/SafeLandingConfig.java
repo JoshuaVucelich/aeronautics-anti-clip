@@ -6,7 +6,7 @@ import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.6.0-rc.24";
+    public static final String VERSION = "0.6.0-rc.25";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -22,12 +22,16 @@ public final class SafeLandingConfig {
     public static final ModConfigSpec.DoubleValue BEDROCK_MARGIN;
     public static final ModConfigSpec.IntValue BEDROCK_TICKS;
     public static final ModConfigSpec.IntValue CONFIG_VERSION;
+    public static final ModConfigSpec.BooleanValue ENABLED;
 
     static {
         AntiClipConfig defaults = AntiClipConfig.defaults();
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
         builder.comment("Aeronautics Anti-Clip. This mod is not published to Modrinth or CurseForge.");
 
+        ENABLED = builder
+                .comment("Master switch. Off disables void rescue, bedrock rescue, the collider feed, carry, and sweep. /anticlip off and /anticlip on flip this and save it. /anticlip status prints the flags.")
+                .define("enabled", defaults.enabled());
         VOID_RESCUE = builder
                 .comment("Shift a sub-level's Y back inside Sable's sub_level_remove bounds before Sable deletes it.")
                 .define("voidRescue", defaults.voidRescue());
@@ -93,6 +97,18 @@ public final class SafeLandingConfig {
         SableSafeLanding.LOGGER.info("Migrated configVersion {} to {} and set carry=true", previous, result.version());
     }
 
+    /**
+     * False only when the loaded config says so. A config that is not ready yet stays on,
+     * and a thrown read does not escape into a mixin.
+     */
+    public static boolean running() {
+        try {
+            return ENABLED.getAsBoolean();
+        } catch (RuntimeException ex) {
+            return true;
+        }
+    }
+
     private SafeLandingConfig() {
     }
 
@@ -113,7 +129,8 @@ public final class SafeLandingConfig {
                 defaults.maxPairChecks(),
                 BEDROCK_RESCUE.getAsBoolean(),
                 BEDROCK_MARGIN.getAsDouble(),
-                BEDROCK_TICKS.getAsInt()
+                BEDROCK_TICKS.getAsInt(),
+                ENABLED.getAsBoolean()
         );
     }
 }

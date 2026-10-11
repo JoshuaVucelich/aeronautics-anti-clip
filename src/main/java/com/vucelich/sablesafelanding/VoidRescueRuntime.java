@@ -7,6 +7,7 @@ import com.vucelich.sablesafelanding.sim.BodyState;
 import com.vucelich.sablesafelanding.sim.RateLimiter;
 import com.vucelich.sablesafelanding.sim.PoseSnapshot;
 import com.vucelich.sablesafelanding.sim.RescueBounds;
+import com.vucelich.sablesafelanding.sim.RescueSite;
 import com.vucelich.sablesafelanding.sim.Rot;
 import com.vucelich.sablesafelanding.sim.SupportMotion;
 import com.vucelich.sablesafelanding.sim.Vec3;
@@ -18,7 +19,11 @@ import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
 import dev.ryanhcode.sable.neoforge.event.ForgeSablePrePhysicsTickEvent;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import org.joml.Quaterniond;
 import org.joml.Quaterniondc;
 import org.joml.Vector3d;
@@ -38,6 +43,8 @@ public final class VoidRescueRuntime {
     private static final RateLimiter RESCUE_LOGS = new RateLimiter(5_000_000_000L);
     private static final RateLimiter BEDROCK_LOGS = new RateLimiter(5_000_000_000L);
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
+    private static final RateLimiter PORTAL_LOGS = new RateLimiter(5_000_000_000L);
+    private static final RateLimiter BURIED_LOGS = new RateLimiter(5_000_000_000L);
     private static boolean removalHookSeen;
     private static boolean loggedThread;
     private static int ticksWithShipsBeforeHook;
@@ -71,6 +78,9 @@ public final class VoidRescueRuntime {
         }
         if (!system.getLevel().getServer().isSameThread()) {
             SableSafeLanding.LOGGER.warn("Ignoring pre-physics rescue off the server thread");
+            return;
+        }
+        if (!SafeLandingConfig.running()) {
             return;
         }
         if (!loggedThread) {
@@ -110,7 +120,16 @@ public final class VoidRescueRuntime {
             if (subLevel.isRemoved()) {
                 return false;
             }
-            if (subLevel.getLevel() instanceof ServerLevel server && !server.getServer().isSameThread()) {
+            if (!(subLevel.getLevel() instanceof ServerLevel server) || !server.getServer().isSameThread()) {
+                return false;
+            }
+            if (!SafeLandingConfig.running()) {
+                return false;
+            }
+            BoundingBox3dc earlyBox = subLevel.boundingBox();
+            Aabb earlyBounds = new Aabb(earlyBox.minX(), earlyBox.minY(), earlyBox.minZ(), earlyBox.maxX(), earlyBox.maxY(), earlyBox.maxZ());
+            if (RescueSite.defer(inPortal(server, earlyBounds))) {
+                logPortal(subLevel.getUniqueId());
                 return false;
             }
             AntiClipConfig config = SafeLandingConfig.snapshot();
@@ -144,6 +163,10 @@ public final class VoidRescueRuntime {
             if (!after.rescued()) {
                 return false;
             }
+            after = acceptRescue(server, after);
+            if (after == null) {
+                return false;
+            }
             apply(subLevel, pipeline, after, true);
             subLevel.updateBoundingBox();
             logRescue(subLevel.getUniqueId(), before, after);
@@ -172,6 +195,9 @@ public final class VoidRescueRuntime {
             }
             ServerSubLevel first = subLevels.get(0);
             if (!(first.getLevel() instanceof ServerLevel level) || !level.getServer().isSameThread()) {
+                return;
+            }
+            if (!SafeLandingConfig.running()) {
                 return;
             }
             AntiClipConfig config = SafeLandingConfig.snapshot();
@@ -219,6 +245,16 @@ public final class VoidRescueRuntime {
         PoseSnapshot remembered = STEP.tracker().get(subLevel.getLevel().dimension().location().toString(), subLevel.getUniqueId().toString());
         if (remembered != null && remembered.time() == time) {
             saved.remember(subLevel.getUniqueId().toString(), remembered);
+        }
+        if (after.rescued() && subLevel.getLevel() instanceof ServerLevel server) {
+            if (RescueSite.defer(inPortal(server, before.bounds()))) {
+                logPortal(subLevel.getUniqueId());
+                return;
+            }
+            after = acceptRescue(server, after);
+            if (after == null) {
+                return;
+            }
         }
         boolean moved = after.position().sub(before.position()).lengthSquared() > 1.0e-12
                 || !after.orientation().equals(before.orientation());
@@ -290,6 +326,82 @@ public final class VoidRescueRuntime {
             subLevel.latestLinearVelocity.zero();
             subLevel.latestAngularVelocity.zero();
         }
+    }
+
+    /**
+     * @return the pose to apply, or null when every nearby cell is solid
+     */
+    private static BodyState acceptRescue(ServerLevel level, BodyState restored) {
+        Vec3 shift = RescueSite.firstClear(
+                RescueSite.offsets(),
+                offset -> occupied(level, restored.bounds().translate(offset))
+        );
+        if (shift == null) {
+            logBuried(restored.id());
+            return null;
+        }
+        if (shift.lengthSquared() == 0.0) {
+            return restored;
+        }
+        return new BodyState(
+                restored.id(),
+                restored.position().add(shift),
+                Vec3.ZERO,
+                restored.bounds().translate(shift),
+                restored.orientation(),
+                true,
+                restored.solidContact()
+        );
+    }
+
+    private static boolean inPortal(ServerLevel level, Aabb box) {
+        if (box == null || !box.finite()) {
+            return false;
+        }
+        int minX = (int) Math.floor(box.minX());
+        int minY = (int) Math.floor(box.minY());
+        int minZ = (int) Math.floor(box.minZ());
+        int maxX = (int) Math.floor(box.maxX());
+        int maxY = (int) Math.floor(box.maxY());
+        int maxZ = (int) Math.floor(box.maxZ());
+        int scanned = 0;
+        for (BlockPos pos : BlockPos.betweenClosed(minX, minY, minZ, maxX, maxY, maxZ)) {
+            if (scanned++ >= 48) {
+                return false;
+            }
+            BlockState state = level.getBlockState(pos);
+            if (state.is(Blocks.NETHER_PORTAL) || state.is(Blocks.END_PORTAL) || state.is(Blocks.END_GATEWAY)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean occupied(ServerLevel level, Aabb box) {
+        try {
+            if (box == null || !box.finite()) {
+                return true;
+            }
+            AABB aabb = new AABB(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ());
+            return !level.noCollision(null, aabb);
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+            return true;
+        }
+    }
+
+    private static void logPortal(UUID id) {
+        if (!PORTAL_LOGS.tryAcquire(System.nanoTime())) {
+            return;
+        }
+        SableSafeLanding.LOGGER.info("Deferred rescue of sub-level {} inside a portal", id);
+    }
+
+    private static void logBuried(String id) {
+        if (!BURIED_LOGS.tryAcquire(System.nanoTime())) {
+            return;
+        }
+        SableSafeLanding.LOGGER.info("Skipped rescue of sub-level {} because the target is buried", id);
     }
 
     private static void logRescue(UUID id, BodyState before, BodyState after) {

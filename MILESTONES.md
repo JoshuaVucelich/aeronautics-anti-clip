@@ -45,3 +45,12 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - Carry is on by default. A config written before that, `configVersion` 0, is migrated to carry on once. A ship is block-tested only when its box, inflated by 0.2, meets that contraption's bounds. Carry stores the deck-frame offset only after real block contact holds for 5 ticks, and it does not place the car before that confirm. The server tick teleports the car when the deck drifts, rotating position and yaw by the bearing angle since capture. Bearing steps of half a degree are written so Sable's client snapshot interpolation can follow; there is no client mixin, and the pose stays on the pre-physics sample. Takeoff reads Rapier body velocity, which a teleport does not change. Upward speed relative to the deck starts the takeoff streak on the blocks, and the car is not pulled back while that streak is running. The lock releases on lost contact, disassembly, an idle deck, that takeoff, or a steering player. A horizontal correction past 8 blocks is refused. The bearing pass metric is `errSeat`.
 - A separate bedrock rescue restores a sub-level that has stayed below min build height minus 32 blocks for 40 ticks to its last safe pose in the same dimension, with velocity zeroed. It does not use the 32-block distance gate, and it does not fire at the remove bounds.
 - Version `0.6.0-rc.24` jar. Still not published to Modrinth or CurseForge.
+
+## M6 — Failure scenarios
+
+- `docs/FAILURE_SCENARIOS.md` records the elevator fall, a frozen-grabber deletion, and the surrounding cases.
+- Carry releases on chunk unload without teleporting, refuses a one-tick step past 4 blocks or 90 degrees, and skips the ride velocity when a physics substep is longer than 0.25 seconds. A car on a carried ship is translated with that ship. New captures examine at most 32 ships a tick and stop at 32 locks.
+- Rescue is not applied inside a portal, is not taken from another dimension, and walks a buried target up to clear air or skips it. Rescue velocity is zero. A disassembled deck clears only a non-finite or absurd speed.
+- `enabled` is the master switch. `/anticlip status`, `/anticlip off`, and `/anticlip on` read and save it. Mixin configs are optional (`require = 0`) and hook bodies swallow a thrown callback.
+- Repro: `FailureScenarioTest`.
+- Version `0.6.0-rc.25` jar. Still not published to Modrinth or CurseForge.
