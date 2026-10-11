@@ -1,0 +1,17 @@
+.gradle/
+build/
+runs/
+run/
+out/
+.idea/
+*.iml
+*.log
+*.jfr
+agent-tools/
+.cursor/
+.neoforge/
+.classpath
+.project
+.settings/
+bin/
+.vscode/
