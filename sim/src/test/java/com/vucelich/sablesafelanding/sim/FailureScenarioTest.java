@@ -117,6 +117,21 @@ class FailureScenarioTest {
     }
 
     @Test
+    void aPassengerOffsetSurvivesAPhysicsPush() {
+        Vec3 axis = new Vec3(0.0, 1.0, 0.0);
+        Vec3 pivot = new Vec3(0.0, 10.0, 0.0);
+        Vec3 child = new Vec3(2.0, 14.0, 1.0);
+        Vec3 local = DeckFollow.localOffset(child, pivot, axis, 0.0);
+        Vec3 drifted = new Vec3(2.0, 14.8, 1.0);
+        Vec3 nextPivot = new Vec3(0.0, 9.8, 0.0);
+        Vec3 incremental = NestedCarry.place(drifted, pivot, nextPivot, axis, 0.0);
+        Vec3 corrected = DeckFollow.worldTarget(local, nextPivot, axis, 0.0);
+        assertEquals(14.6, incremental.y(), 1.0e-9);
+        assertEquals(13.8, corrected.y(), 1.0e-9);
+        assertTrue(CarryGate.safeStep(drifted.sub(corrected).length(), 0.0));
+    }
+
+    @Test
     void aBearingThatTurnsThroughSeveralRevolutionsDoesNotSpikeOnTheWrap() {
         double rawWrap = Math.toRadians(10.0 - 350.0);
         assertFalse(CarryGate.safeStep(0.0, rawWrap));

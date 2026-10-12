@@ -10,6 +10,10 @@ base {
     archivesName = mod_id
 }
 
+sourceSets {
+    bench
+}
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -26,6 +30,8 @@ repositories {
 
 neoForge {
     version = project.neo_version
+
+    addModdingDependenciesTo sourceSets.bench
 
     mods {
         "${mod_id}" {
@@ -45,6 +51,26 @@ dependencies {
         exclude group: 'foundry.veil'
     }
     compileOnly "net.createmod.ponder:ponder-neoforge:${ponder_version}"
+
+    benchCompileOnly("dev.ryanhcode.sable:sable-neoforge-${minecraft_version}:${sable_version}") {
+        exclude group: 'foundry.veil'
+        exclude group: 'com.simibubi.create'
+    }
+    benchCompileOnly "dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:${companion_version}"
+    benchCompileOnly("com.simibubi.create:create-${minecraft_version}:${create_version}") {
+        exclude group: 'foundry.veil'
+    }
+    benchCompileOnly "net.createmod.ponder:ponder-neoforge:${ponder_version}"
+}
+
+tasks.register('benchJar', Jar) {
+    group = 'build'
+    description = 'Headless pack bench. Not part of the release jar and not published.'
+    dependsOn tasks.named('compileBenchJava'), tasks.named('processBenchResources')
+    archiveBaseName = 'anticlip_bench'
+    from sourceSets.bench.output
+    destinationDirectory = layout.buildDirectory.dir('libs')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
 tasks.named('jar', Jar).configure {
@@ -66,6 +92,10 @@ tasks.named('jar', Jar).configure {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 21
+}
+
+tasks.named('processBenchResources', ProcessResources).configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
 tasks.named('processResources', ProcessResources).configure {

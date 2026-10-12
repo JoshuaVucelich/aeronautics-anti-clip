@@ -83,6 +83,8 @@ public final class CarryRuntime {
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static final Map<String, Sample> SAMPLES = new HashMap<>();
     private static final Map<String, DeckLock> LOCKS = new HashMap<>();
+    /** Child sub-level id to the deck-frame offset captured the first time it rode a parent. */
+    private static final Map<String, PassengerSeat> SEATS = new HashMap<>();
     private static final Map<String, CachedSupports> SUPPORT_CACHE = new HashMap<>();
     private static final Map<String, CachedSupports> BLOCK_CACHE = new HashMap<>();
     private static final Set<String> PLACEMENT_LOGGED = new HashSet<>();
@@ -198,6 +200,7 @@ public final class CarryRuntime {
             AntiClipConfig config = SafeLandingConfig.snapshot();
             if (!config.enabled()) {
                 LOCKS.clear();
+                SEATS.clear();
                 return;
             }
             if (!config.carry() && !config.sweep() && !config.feedColliders()) {
@@ -239,6 +242,7 @@ public final class CarryRuntime {
             AntiClipConfig config = SafeLandingConfig.snapshot();
             if (!config.enabled() || !config.carry()) {
                 LOCKS.clear();
+                SEATS.clear();
                 return;
             }
             for (ServerLevel level : event.getServer().getAllLevels()) {
@@ -252,6 +256,7 @@ public final class CarryRuntime {
     public static void clear() {
         SAMPLES.clear();
         LOCKS.clear();
+        SEATS.clear();
         SUPPORT_CACHE.clear();
         BLOCK_CACHE.clear();
         PLACEMENT_LOGGED.clear();
@@ -296,6 +301,7 @@ public final class CarryRuntime {
     }
 
     private static void tickCarry(ServerLevel level) {
+        prunePassengers();
         if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
             return;
         }
@@ -661,7 +667,7 @@ public final class CarryRuntime {
             ship.logicalPose().orientation().set(orientation);
         }
         ship.updateLastPose();
-        shiftPassengers(level, ship, lock, oldPivot, pivot, angleStep);
+        shiftPassengers(level, ship, lock, oldPivot, pivot, angle, angleStep);
         lock.lastPlacedAngle = angle;
         lock.placedPivotX = pivot.x();
         lock.placedPivotY = pivot.y();
@@ -1198,8 +1204,10 @@ public final class CarryRuntime {
     }
 
     /**
-     * Moves a car that is sitting on a carried ship by the same pivot motion.
-     * A child with its own lock is left to that lock. A step past the spike cap is skipped.
+     * Moves a car that is sitting on a carried ship by the parent's pivot.
+     * The deck-frame offset is captured once. Later ticks rebuild the world pose from the
+     * pivot, the same way the parent lock does. Applying only this tick's delta lets the
+     * physics read walk the car off the hull, and the footprint test then drops it.
      */
     private static void shiftPassengers(
             ServerLevel level,
@@ -1207,46 +1215,99 @@ public final class CarryRuntime {
             DeckLock lock,
             Vec3 oldPivot,
             Vec3 pivot,
+            double angle,
             double angleStep
     ) {
         if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
             return;
         }
-        Aabb hull = shipBox(parent);
-        if (hull == null || !oldPivot.finite() || !pivot.finite()) {
+        if (!oldPivot.finite() || !pivot.finite() || lock.axis == null) {
             return;
         }
+        Aabb hull = shipBox(parent);
+        String parentId = parent.getUniqueId().toString();
         Set<String> locked = new HashSet<>();
         for (DeckLock held : LOCKS.values()) {
             if (held.ship != null) {
                 locked.add(held.ship.getUniqueId().toString());
             }
         }
-        int moved = 0;
+        int riding = passengersOf(parentId);
         for (ServerSubLevel child : container.getAllSubLevels()) {
             if (child == parent || child.isRemoved() || child.getLevel() != level || piloting(level, child)) {
                 continue;
             }
-            if (locked.contains(child.getUniqueId().toString())) {
+            String childId = child.getUniqueId().toString();
+            if (locked.contains(childId)) {
                 continue;
             }
-            Aabb box = shipBox(child);
-            if (!NestedCarry.passenger(hull, box)) {
+            PassengerSeat seat = SEATS.get(childId);
+            if (seat != null && !seat.parentId.equals(parentId)) {
                 continue;
-            }
-            if (moved >= NestedCarry.MAX_PASSENGERS) {
-                break;
             }
             Vector3dc position = child.logicalPose().position();
             Vec3 childPos = new Vec3(position.x(), position.y(), position.z());
-            Vec3 childTarget = NestedCarry.place(childPos, oldPivot, pivot, lock.axis, angleStep);
-            if (!childTarget.finite() || !CarryGate.safeStep(childPos.sub(childTarget).length(), angleStep)) {
+            if (seat == null) {
+                if (hull == null || !NestedCarry.passenger(hull, shipBox(child)) || riding >= NestedCarry.MAX_PASSENGERS) {
+                    continue;
+                }
+                Quaterniondc orientation = child.logicalPose().orientation();
+                seat = new PassengerSeat(
+                        parentId,
+                        DeckFollow.localOffset(childPos, oldPivot, lock.axis, lock.lastPlacedAngle),
+                        new Rot(orientation.x(), orientation.y(), orientation.z(), orientation.w()),
+                        lock.lastPlacedAngle
+                );
+                if (!seat.local.finite() || !seat.boarded.finite()) {
+                    continue;
+                }
+                SEATS.put(childId, seat);
+                riding++;
+            }
+            Vec3 childTarget = DeckFollow.worldTarget(seat.local, pivot, lock.axis, angle);
+            if (!childTarget.finite()
+                    || !DeckFollow.acceptable(childPos, childTarget)
+                    || !CarryGate.safeStep(childPos.sub(childTarget).length(), angleStep)) {
                 continue;
             }
-            Quaterniondc orientation = child.logicalPose().orientation();
-            Rot turned = new Rot(orientation.x(), orientation.y(), orientation.z(), orientation.w()).turned(lock.axis, angleStep);
+            Rot turned = DeckFollow.orientation(seat.boarded, lock.axis, seat.capturedAngle, angle);
             shiftBody(level, child, childTarget, turned);
-            moved++;
+        }
+    }
+
+    private static int passengersOf(String parentId) {
+        int count = 0;
+        for (PassengerSeat seat : SEATS.values()) {
+            if (parentId.equals(seat.parentId)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** Drops offsets whose parent is no longer carried. */
+    private static void prunePassengers() {
+        Set<String> parents = new HashSet<>();
+        for (DeckLock lock : LOCKS.values()) {
+            if (lock.ship != null && !lock.ship.isRemoved()) {
+                parents.add(lock.ship.getUniqueId().toString());
+            }
+        }
+        SEATS.entrySet().removeIf(entry -> !parents.contains(entry.getValue().parentId));
+    }
+
+    /** Offset from the parent pivot, taken the first tick the child was on the hull. */
+    private static final class PassengerSeat {
+        private final String parentId;
+        private final Vec3 local;
+        private final Rot boarded;
+        private final double capturedAngle;
+
+        private PassengerSeat(String parentId, Vec3 local, Rot boarded, double capturedAngle) {
+            this.parentId = parentId;
+            this.local = local;
+            this.boarded = boarded;
+            this.capturedAngle = capturedAngle;
         }
     }
 

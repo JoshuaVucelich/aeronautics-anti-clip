@@ -56,3 +56,10 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - `/anticlip off`, and turning the feed off in the config, clears `sable$initialized` for every claim, including one that was never uploaded. The sync pass drops a disassembled or removed contraption from that map. Rescue refuses a cell that contains liquid. A portal check runs only when a rescue is about to fire, on the bottom layer, with stride `ceil(sqrt(area / 256))`, skipping unloaded columns, and stops at 256 reads. The clamp query is world blocks only.
 - Repro: `FailureScenarioTest`.
 - Version `0.6.0-rc.28` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.1
+
+- A long hull's portal scan stays inside 256 reads and still reaches the far end. A fresh config stamps `configVersion` without logging that carry was turned on.
+- A car on a carried ship keeps the deck-frame offset from the first tick it was on the hull. Replaying only the latest pivot step let the physics read walk it off the footprint.
+- Headless A/B on the pack (NeoForge 21.1.233, Create 6.0.10, Sable 2.0.3, Aeronautics 1.3.0 bundled, no Sodium) is in `bench/results/comparison.md`. MSPT is server-tick wall time. Desync is Sable 2.0.3's client interpolator (delay 1.5 ticks, dead reckoning clamped to 1 tick) against the pose after the server tick.
+- Version `0.7.0-rc.1` jar. Still not published to Modrinth or CurseForge.

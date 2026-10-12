@@ -1,0 +1,82 @@
+{
+  "anticlip": "absent",
+  "neoforge": "21.1.233",
+  "create": "6.0.10",
+  "sable": "2.0.3",
+  "aeronautics": "1.3.0",
+  "sodium": false,
+  "scenes": [
+    {
+      "name": "parked",
+      "ticks": 400,
+      "mspt": {"mean": 1.574204, "p99": 5.482208, "stddev": 0.914308, "max": 8.994711, "n": 400},
+      "outcome": "platform-did-not-move",
+      "shipOutcome": "",
+      "anchorDelta": 0.000000,
+      "carDelta": -0.000023,
+      "shipDelta": null,
+      "bodies": {
+        "car": {
+          "desync": {"mean": 0.000000, "p99": 0.000000, "stddev": 0.000000, "max": 0.000000, "n": 400},
+          "clientJitterRms": 0.000000,
+          "serverJitterRms": 0.000000,
+          "errorJitterRms": 0.000000,
+          "movePackets": 1,
+          "stopPackets": 1,
+          "rubberBand": false
+        }
+      }
+    },
+    {
+      "name": "elevator",
+      "ticks": 80,
+      "mspt": {"mean": 1.318914, "p99": 2.881488, "stddev": 0.531884, "max": 2.881488, "n": 80},
+      "outcome": "separated",
+      "shipOutcome": "",
+      "anchorDelta": -4.000000,
+      "carDelta": -0.002497,
+      "shipDelta": null,
+      "bodies": {
+        "car": {
+          "desync": {"mean": 0.000468, "p99": 0.000912, "stddev": 0.000137, "max": 0.000912, "n": 80},
+          "clientJitterRms": 0.000168,
+          "serverJitterRms": 0.000014,
+          "errorJitterRms": 0.000169,
+          "movePackets": 3,
+          "stopPackets": 3,
+          "rubberBand": false
+        }
+      }
+    },
+    {
+      "name": "ship",
+      "ticks": 80,
+      "mspt": {"mean": 1.358160, "p99": 4.663775, "stddev": 0.760204, "max": 4.663775, "n": 80},
+      "outcome": "separated",
+      "shipOutcome": "separated",
+      "anchorDelta": -4.000000,
+      "carDelta": -0.005142,
+      "shipDelta": -0.002560,
+      "bodies": {
+        "car": {
+          "desync": {"mean": 0.000692, "p99": 0.000908, "stddev": 0.000275, "max": 0.000908, "n": 80},
+          "clientJitterRms": 0.000232,
+          "serverJitterRms": 0.000016,
+          "errorJitterRms": 0.000233,
+          "movePackets": 5,
+          "stopPackets": 5,
+          "rubberBand": false
+        },
+        "ship": {
+          "desync": {"mean": 0.000449, "p99": 0.000908, "stddev": 0.000137, "max": 0.000908, "n": 80},
+          "clientJitterRms": 0.000173,
+          "serverJitterRms": 0.000011,
+          "errorJitterRms": 0.000174,
+          "movePackets": 3,
+          "stopPackets": 3,
+          "rubberBand": false
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+
+[[mods]]
+modId="anticlip_bench"
+version="0.0.0"
+displayName="Anti-Clip Bench"
+authors="Joshua Vucelich"
+description='''Headless MSPT and desync bench for the pack. Not part of the release jar and not published.'''
+
+[[dependencies.anticlip_bench]]
+modId="neoforge"
+type="required"
+versionRange="[21.1.228,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.anticlip_bench]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1,1.21.2)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.anticlip_bench]]
+modId="sable"
+type="required"
+versionRange="[2.0.3,2.1.0)"
+ordering="AFTER"
+side="BOTH"
+
+[[dependencies.anticlip_bench]]
+modId="create"
+type="required"
+versionRange="[6.0.10,6.1.0)"
+ordering="AFTER"
+side="BOTH"
