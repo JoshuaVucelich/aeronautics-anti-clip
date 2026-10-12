@@ -6,10 +6,12 @@ import java.util.Set;
 
 /**
  * Deck-frame offsets for cars sitting on a carried ship.
- * A seat is stored only after the child is still on the hull. A piloted tick and a
- * correction that fails {@link DeckFollow#acceptable} or {@link CarryGate#safeStep}
- * drop it, so the next on-hull tick captures where the car is now instead of snapping
- * back to the old spot, and a step past the cap does not block every later tick.
+ * A seat is stored only after the child is still on the hull. A piloted tick, a car
+ * that leaves the hull, and a correction that fails {@link DeckFollow#acceptable} or
+ * {@link CarryGate#safeStep} drop it, so the next on-hull tick captures where the car
+ * is now instead of snapping back to the old spot, and a step past the cap does not
+ * block every later tick. A prune names one dimension, so a Nether tick does not drop
+ * an Overworld seat.
  */
 public final class PassengerBook {
     private final Map<String, Seat> seats = new LinkedHashMap<>();
@@ -56,6 +58,18 @@ public final class PassengerBook {
         seats.keySet().retainAll(liveChildIds);
     }
 
+    /**
+     * Drops seats in {@code dimension} whose child is not in {@code liveChildIds}.
+     * Seats stored for any other dimension stay, so a Nether tick cannot clear the Overworld.
+     */
+    public void retainDimension(String dimension, Set<String> liveChildIds) {
+        if (dimension == null) {
+            return;
+        }
+        seats.entrySet().removeIf(entry -> dimension.equals(entry.getValue().dimension)
+                && (liveChildIds == null || !liveChildIds.contains(entry.getKey())));
+    }
+
     public void forgetDimension(String dimension) {
         if (dimension == null) {
             return;
@@ -65,7 +79,8 @@ public final class PassengerBook {
 
     /**
      * One child during one parent placement.
-     * Removes the seat on a piloted tick, a removed child, and a rejected correction.
+     * Removes the seat on a piloted tick, a removed child, a child with its own lock,
+     * a car that has left the hull, and a rejected correction.
      * Captures a seat only after the hull check, and only when one is not already held.
      *
      * @return the pose to teleport to, or null when this child is not moved
@@ -79,6 +94,7 @@ public final class PassengerBook {
             return null;
         }
         if (tick.ownLock) {
+            remove(tick.childId);
             return null;
         }
         Seat existing = seats.get(tick.childId);
@@ -105,6 +121,7 @@ public final class PassengerBook {
                 return null;
             }
         } else if (!onHull) {
+            remove(tick.childId);
             return null;
         }
         if (tick.pivot == null || tick.axis == null || tick.childPos == null) {

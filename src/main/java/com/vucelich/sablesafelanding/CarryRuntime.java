@@ -305,8 +305,8 @@ public final class CarryRuntime {
         if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
             return;
         }
-        prunePassengers(container);
         String dimension = level.dimension().location().toString();
+        prunePassengers(dimension, container);
         String prefix = dimension + "\0";
         List<DeckBox> decks = deckBoxes(level, dimension);
         List<String> drop = new ArrayList<>();
@@ -1206,9 +1206,10 @@ public final class CarryRuntime {
 
     /**
      * Moves a car that is sitting on a carried ship by the parent's pivot.
-     * The offset is captured only while the child is still on the hull. A piloted tick
-     * and a correction past {@code acceptable} or {@code safeStep} drop that seat, so
-     * the next on-hull tick stores where the car is now.
+     * The offset is captured only while the child is still on the hull. A piloted tick,
+     * a car that leaves the hull, a child with its own lock or in another level, and a
+     * correction past {@code acceptable} or {@code safeStep} drop that seat, so the next
+     * on-hull tick stores where the car is now.
      */
     private static void shiftPassengers(
             ServerLevel level,
@@ -1244,6 +1245,7 @@ public final class CarryRuntime {
                 continue;
             }
             if (child.getLevel() != level || locked.contains(childId)) {
+                SEATS.remove(childId);
                 continue;
             }
             Vector3dc position = child.logicalPose().position();
@@ -1273,8 +1275,11 @@ public final class CarryRuntime {
         }
     }
 
-    /** Drops offsets whose parent is no longer carried, and seats whose child is gone. */
-    private static void prunePassengers(ServerSubLevelContainer container) {
+    /**
+     * Drops offsets whose parent is no longer carried, and this dimension's seats
+     * whose child is gone. Other dimensions are left for their own tick.
+     */
+    private static void prunePassengers(String dimension, ServerSubLevelContainer container) {
         Set<String> parents = new HashSet<>();
         for (DeckLock lock : LOCKS.values()) {
             if (lock.ship != null && !lock.ship.isRemoved()) {
@@ -1288,7 +1293,7 @@ public final class CarryRuntime {
                 live.add(subLevel.getUniqueId().toString());
             }
         }
-        SEATS.retain(live);
+        SEATS.retainDimension(dimension, live);
     }
 
     private static void shiftBody(ServerLevel level, ServerSubLevel child, Vec3 target, Rot turned) {

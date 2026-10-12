@@ -178,6 +178,38 @@ class FailureScenarioTest {
         Vec3 nextPivot = new Vec3(8.0, 10.3, 3.0);
         assertNull(ride(book, "car", false, hull, boxAround(gone), gone, pivot, nextPivot));
         assertNull(book.seat("car"));
+
+        assertNotNull(ride(book, "car", false, hull, boxAround(boarded), boarded, nextPivot, nextPivot));
+        assertNull(ride(book, "car", false, hull, boxAround(gone), gone, nextPivot, nextPivot));
+        assertNull(book.seat("car"));
+    }
+
+    @Test
+    void aNetherPruneKeepsAnOverworldSeat() {
+        PassengerBook book = new PassengerBook();
+        Aabb hull = new Aabb(0.0, 10.0, 0.0, 16.0, 11.0, 6.0);
+        Vec3 pivot = new Vec3(8.0, 10.5, 3.0);
+        Vec3 overworldAt = new Vec3(2.0, 11.5, 2.0);
+        assertNotNull(ride(book, "overworld-car", false, hull, boxAround(overworldAt), overworldAt, pivot, pivot));
+        Vec3 netherAt = new Vec3(4.0, 11.5, 2.0);
+        assertNotNull(book.apply(new PassengerBook.Tick(
+                "nether-car", "nether-ship", NETHER, false, false, false,
+                hull, boxAround(netherAt), netherAt, Rot.IDENTITY,
+                pivot, pivot, new Vec3(0.0, 1.0, 0.0), 0.0, 0.0, 0.0
+        )));
+
+        book.retainDimension(NETHER, Set.of());
+        assertEquals(OVERWORLD, book.seat("overworld-car").dimension());
+        assertNull(book.seat("nether-car"));
+
+        assertNotNull(book.apply(new PassengerBook.Tick(
+                "nether-car", "nether-ship", NETHER, false, false, false,
+                hull, boxAround(netherAt), netherAt, Rot.IDENTITY,
+                pivot, pivot, new Vec3(0.0, 1.0, 0.0), 0.0, 0.0, 0.0
+        )));
+        book.retainDimension(NETHER, Set.of("nether-car"));
+        assertNotNull(book.seat("overworld-car"));
+        assertEquals(NETHER, book.seat("nether-car").dimension());
     }
 
     @Test

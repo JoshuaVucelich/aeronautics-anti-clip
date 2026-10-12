@@ -69,3 +69,9 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - A piloted passenger drops its seat. The next tick stores a new deck offset only while the car is still on the hull, so releasing on a new spot keeps that spot and releasing off the hull does not snap the car back. A correction past the step cap drops the seat too, and the following tick can carry from where the car actually is.
 - Seats for removed passengers are dropped and do not hold one of the 8 slots. `forgetDimension` drops that dimension's seats.
 - Version `0.7.0-rc.2` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.3
+
+- A level tick prunes seats only in that dimension. A Nether or End tick no longer clears every Overworld seat.
+- A car that leaves the hull drops its seat. A child that takes its own lock, or whose level is no longer the one being ticked, drops its seat too.
+- Version `0.7.0-rc.3` jar. Still not published to Modrinth or CurseForge.
