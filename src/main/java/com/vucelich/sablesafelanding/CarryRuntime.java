@@ -10,7 +10,7 @@ import com.vucelich.sablesafelanding.sim.AntiClipStep;
 import com.vucelich.sablesafelanding.sim.CarryBroadphase;
 import com.vucelich.sablesafelanding.sim.CarryBudget;
 import com.vucelich.sablesafelanding.sim.CarryGate;
-import com.vucelich.sablesafelanding.sim.NestedCarry;
+import com.vucelich.sablesafelanding.sim.PassengerBook;
 import com.vucelich.sablesafelanding.sim.VelocityClamp;
 import com.vucelich.sablesafelanding.sim.DeckContact;
 import com.vucelich.sablesafelanding.sim.DeckFollow;
@@ -83,8 +83,8 @@ public final class CarryRuntime {
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static final Map<String, Sample> SAMPLES = new HashMap<>();
     private static final Map<String, DeckLock> LOCKS = new HashMap<>();
-    /** Child sub-level id to the deck-frame offset captured the first time it rode a parent. */
-    private static final Map<String, PassengerSeat> SEATS = new HashMap<>();
+    /** Deck-frame offsets for cars sitting on a carried ship. */
+    private static final PassengerBook SEATS = new PassengerBook();
     private static final Map<String, CachedSupports> SUPPORT_CACHE = new HashMap<>();
     private static final Map<String, CachedSupports> BLOCK_CACHE = new HashMap<>();
     private static final Set<String> PLACEMENT_LOGGED = new HashSet<>();
@@ -269,6 +269,7 @@ public final class CarryRuntime {
         LOCKS.keySet().removeIf(key -> key.startsWith(prefix));
         BLOCK_CACHE.keySet().removeIf(key -> key.startsWith(prefix));
         SUPPORT_CACHE.remove(dimension);
+        SEATS.forgetDimension(dimension);
     }
 
     public static boolean holding(UUID shipId) {
@@ -301,10 +302,10 @@ public final class CarryRuntime {
     }
 
     private static void tickCarry(ServerLevel level) {
-        prunePassengers();
         if (!(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
             return;
         }
+        prunePassengers(container);
         String dimension = level.dimension().location().toString();
         String prefix = dimension + "\0";
         List<DeckBox> decks = deckBoxes(level, dimension);
@@ -1205,9 +1206,9 @@ public final class CarryRuntime {
 
     /**
      * Moves a car that is sitting on a carried ship by the parent's pivot.
-     * The deck-frame offset is captured once. Later ticks rebuild the world pose from the
-     * pivot, the same way the parent lock does. Applying only this tick's delta lets the
-     * physics read walk the car off the hull, and the footprint test then drops it.
+     * The offset is captured only while the child is still on the hull. A piloted tick
+     * and a correction past {@code acceptable} or {@code safeStep} drop that seat, so
+     * the next on-hull tick stores where the car is now.
      */
     private static void shiftPassengers(
             ServerLevel level,
@@ -1226,89 +1227,68 @@ public final class CarryRuntime {
         }
         Aabb hull = shipBox(parent);
         String parentId = parent.getUniqueId().toString();
+        String dimension = level.dimension().location().toString();
         Set<String> locked = new HashSet<>();
         for (DeckLock held : LOCKS.values()) {
             if (held.ship != null) {
                 locked.add(held.ship.getUniqueId().toString());
             }
         }
-        int riding = passengersOf(parentId);
         for (ServerSubLevel child : container.getAllSubLevels()) {
-            if (child == parent || child.isRemoved() || child.getLevel() != level || piloting(level, child)) {
+            if (child == parent) {
                 continue;
             }
             String childId = child.getUniqueId().toString();
-            if (locked.contains(childId)) {
+            if (child.isRemoved() || piloting(level, child)) {
+                SEATS.remove(childId);
                 continue;
             }
-            PassengerSeat seat = SEATS.get(childId);
-            if (seat != null && !seat.parentId.equals(parentId)) {
+            if (child.getLevel() != level || locked.contains(childId)) {
                 continue;
             }
             Vector3dc position = child.logicalPose().position();
-            Vec3 childPos = new Vec3(position.x(), position.y(), position.z());
-            if (seat == null) {
-                if (hull == null || !NestedCarry.passenger(hull, shipBox(child)) || riding >= NestedCarry.MAX_PASSENGERS) {
-                    continue;
-                }
-                Quaterniondc orientation = child.logicalPose().orientation();
-                seat = new PassengerSeat(
-                        parentId,
-                        DeckFollow.localOffset(childPos, oldPivot, lock.axis, lock.lastPlacedAngle),
-                        new Rot(orientation.x(), orientation.y(), orientation.z(), orientation.w()),
-                        lock.lastPlacedAngle
-                );
-                if (!seat.local.finite() || !seat.boarded.finite()) {
-                    continue;
-                }
-                SEATS.put(childId, seat);
-                riding++;
-            }
-            Vec3 childTarget = DeckFollow.worldTarget(seat.local, pivot, lock.axis, angle);
-            if (!childTarget.finite()
-                    || !DeckFollow.acceptable(childPos, childTarget)
-                    || !CarryGate.safeStep(childPos.sub(childTarget).length(), angleStep)) {
+            Quaterniondc orientation = child.logicalPose().orientation();
+            PassengerBook.Placement placement = SEATS.apply(new PassengerBook.Tick(
+                    childId,
+                    parentId,
+                    dimension,
+                    false,
+                    false,
+                    false,
+                    hull,
+                    shipBox(child),
+                    new Vec3(position.x(), position.y(), position.z()),
+                    new Rot(orientation.x(), orientation.y(), orientation.z(), orientation.w()),
+                    oldPivot,
+                    pivot,
+                    lock.axis,
+                    lock.lastPlacedAngle,
+                    angle,
+                    angleStep
+            ));
+            if (placement == null) {
                 continue;
             }
-            Rot turned = DeckFollow.orientation(seat.boarded, lock.axis, seat.capturedAngle, angle);
-            shiftBody(level, child, childTarget, turned);
+            shiftBody(level, child, placement.position(), placement.orientation());
         }
     }
 
-    private static int passengersOf(String parentId) {
-        int count = 0;
-        for (PassengerSeat seat : SEATS.values()) {
-            if (parentId.equals(seat.parentId)) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    /** Drops offsets whose parent is no longer carried. */
-    private static void prunePassengers() {
+    /** Drops offsets whose parent is no longer carried, and seats whose child is gone. */
+    private static void prunePassengers(ServerSubLevelContainer container) {
         Set<String> parents = new HashSet<>();
         for (DeckLock lock : LOCKS.values()) {
             if (lock.ship != null && !lock.ship.isRemoved()) {
                 parents.add(lock.ship.getUniqueId().toString());
             }
         }
-        SEATS.entrySet().removeIf(entry -> !parents.contains(entry.getValue().parentId));
-    }
-
-    /** Offset from the parent pivot, taken the first tick the child was on the hull. */
-    private static final class PassengerSeat {
-        private final String parentId;
-        private final Vec3 local;
-        private final Rot boarded;
-        private final double capturedAngle;
-
-        private PassengerSeat(String parentId, Vec3 local, Rot boarded, double capturedAngle) {
-            this.parentId = parentId;
-            this.local = local;
-            this.boarded = boarded;
-            this.capturedAngle = capturedAngle;
+        SEATS.forgetParents(parents);
+        Set<String> live = new HashSet<>();
+        for (ServerSubLevel subLevel : container.getAllSubLevels()) {
+            if (!subLevel.isRemoved()) {
+                live.add(subLevel.getUniqueId().toString());
+            }
         }
+        SEATS.retain(live);
     }
 
     private static void shiftBody(ServerLevel level, ServerSubLevel child, Vec3 target, Rot turned) {

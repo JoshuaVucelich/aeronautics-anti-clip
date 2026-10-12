@@ -9,6 +9,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -129,6 +130,87 @@ class FailureScenarioTest {
         assertEquals(14.6, incremental.y(), 1.0e-9);
         assertEquals(13.8, corrected.y(), 1.0e-9);
         assertTrue(CarryGate.safeStep(drifted.sub(corrected).length(), 0.0));
+    }
+
+    @Test
+    void aCarDrivenToANewDeckSpotIsRecapturedOnRelease() {
+        PassengerBook book = new PassengerBook();
+        Aabb hull = new Aabb(0.0, 10.0, 0.0, 16.0, 11.0, 6.0);
+        Vec3 pivot = new Vec3(8.0, 10.5, 3.0);
+        Vec3 boarded = new Vec3(2.0, 11.5, 2.0);
+        assertEquals(boarded.x(), ride(book, "car", false, hull, boxAround(boarded), boarded, pivot, pivot).x(), 1.0e-9);
+
+        Vec3 pushed = new Vec3(2.0, 11.9, 2.0);
+        Vec3 corrected = ride(book, "car", false, hull, boxAround(pushed), pushed, pivot, pivot);
+        assertEquals(11.5, corrected.y(), 1.0e-9);
+
+        Vec3 driven = new Vec3(6.0, 11.5, 2.0);
+        assertNull(ride(book, "car", true, hull, boxAround(driven), driven, pivot, pivot));
+        assertNull(book.seat("car"));
+
+        Vec3 nextPivot = new Vec3(8.0, 10.3, 3.0);
+        Vec3 released = ride(book, "car", false, hull, boxAround(driven), driven, pivot, nextPivot);
+        assertEquals(6.0, released.x(), 1.0e-9);
+        assertEquals(11.3, released.y(), 1.0e-9);
+
+        Vec3 slid = new Vec3(12.0, 11.5, 2.0);
+        assertNull(ride(book, "car", false, hull, boxAround(slid), slid, nextPivot, nextPivot));
+        assertNull(book.seat("car"));
+        Vec3 laterPivot = new Vec3(8.0, 10.1, 3.0);
+        Vec3 carried = ride(book, "car", false, hull, boxAround(slid), slid, nextPivot, laterPivot);
+        assertEquals(12.0, carried.x(), 1.0e-9);
+        assertEquals(11.3, carried.y(), 1.0e-9);
+        assertEquals("ship", book.seat("car").parentId());
+    }
+
+    @Test
+    void aCarDrivenOffTheHullIsNotSnappedBackOnRelease() {
+        PassengerBook book = new PassengerBook();
+        Aabb hull = new Aabb(0.0, 10.0, 0.0, 16.0, 11.0, 6.0);
+        Vec3 pivot = new Vec3(8.0, 10.5, 3.0);
+        Vec3 boarded = new Vec3(2.0, 11.5, 2.0);
+        ride(book, "car", false, hull, boxAround(boarded), boarded, pivot, pivot);
+
+        Vec3 gone = new Vec3(21.0, 11.5, 2.0);
+        assertNull(ride(book, "car", true, hull, boxAround(gone), gone, pivot, pivot));
+        assertNull(book.seat("car"));
+
+        Vec3 nextPivot = new Vec3(8.0, 10.3, 3.0);
+        assertNull(ride(book, "car", false, hull, boxAround(gone), gone, pivot, nextPivot));
+        assertNull(book.seat("car"));
+    }
+
+    @Test
+    void removedPassengersAndAForgottenDimensionDoNotHoldSeats() {
+        PassengerBook book = new PassengerBook();
+        Aabb hull = new Aabb(0.0, 10.0, 0.0, 24.0, 11.0, 6.0);
+        Vec3 pivot = new Vec3(12.0, 10.5, 3.0);
+        for (int i = 0; i < NestedCarry.MAX_PASSENGERS; i++) {
+            Vec3 at = new Vec3(1.0 + i, 11.5, 2.0);
+            assertNotNull(ride(book, "c" + i, false, hull, boxAround(at), at, pivot, pivot));
+        }
+        Vec3 ninth = new Vec3(1.0 + NestedCarry.MAX_PASSENGERS, 11.5, 2.0);
+        assertNull(ride(book, "extra", false, hull, boxAround(ninth), ninth, pivot, pivot));
+        assertEquals(NestedCarry.MAX_PASSENGERS, book.count("ship"));
+
+        assertNull(book.apply(tick("c0", true, true, hull, boxAround(new Vec3(1.0, 11.5, 2.0)), new Vec3(1.0, 11.5, 2.0), pivot, pivot)));
+        assertEquals(NestedCarry.MAX_PASSENGERS - 1, book.count("ship"));
+        assertNotNull(ride(book, "extra", false, hull, boxAround(ninth), ninth, pivot, pivot));
+        assertEquals(NestedCarry.MAX_PASSENGERS, book.count("ship"));
+
+        book.retain(Set.of("extra"));
+        assertEquals(1, book.count("ship"));
+        assertNull(book.seat("c1"));
+
+        Vec3 netherAt = new Vec3(3.0, 11.5, 2.0);
+        book.apply(new PassengerBook.Tick(
+                "nether-car", "nether-ship", NETHER, false, false, false,
+                hull, boxAround(netherAt), netherAt, Rot.IDENTITY,
+                pivot, pivot, new Vec3(0.0, 1.0, 0.0), 0.0, 0.0, 0.0
+        ));
+        book.forgetDimension(OVERWORLD);
+        assertNull(book.seat("extra"));
+        assertEquals(NETHER, book.seat("nether-car").dimension());
     }
 
     @Test
@@ -304,5 +386,53 @@ class FailureScenarioTest {
             degrees += 360.0f;
         }
         return Math.toRadians(degrees);
+    }
+
+    private static Vec3 ride(
+            PassengerBook book,
+            String child,
+            boolean piloting,
+            Aabb hull,
+            Aabb box,
+            Vec3 position,
+            Vec3 oldPivot,
+            Vec3 pivot
+    ) {
+        PassengerBook.Placement placement = book.apply(tick(child, piloting, false, hull, box, position, oldPivot, pivot));
+        return placement == null ? null : placement.position();
+    }
+
+    private static PassengerBook.Tick tick(
+            String child,
+            boolean piloting,
+            boolean removed,
+            Aabb hull,
+            Aabb box,
+            Vec3 position,
+            Vec3 oldPivot,
+            Vec3 pivot
+    ) {
+        return new PassengerBook.Tick(
+                child,
+                "ship",
+                OVERWORLD,
+                piloting,
+                removed,
+                false,
+                hull,
+                box,
+                position,
+                Rot.IDENTITY,
+                oldPivot,
+                pivot,
+                new Vec3(0.0, 1.0, 0.0),
+                0.0,
+                0.0,
+                0.0
+        );
+    }
+
+    private static Aabb boxAround(Vec3 center) {
+        return new Aabb(center.x() - 1.0, center.y() - 0.5, center.z() - 1.0, center.x() + 1.0, center.y() + 0.5, center.z() + 1.0);
     }
 }

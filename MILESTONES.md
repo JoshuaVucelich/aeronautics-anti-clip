@@ -63,3 +63,9 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - A car on a carried ship keeps the deck-frame offset from the first tick it was on the hull. Replaying only the latest pivot step let the physics read walk it off the footprint.
 - Headless A/B on the pack (NeoForge 21.1.233, Create 6.0.10, Sable 2.0.3, Aeronautics 1.3.0 bundled, no Sodium) is in `bench/results/comparison.md`. MSPT is server-tick wall time. Desync is Sable 2.0.3's client interpolator (delay 1.5 ticks, dead reckoning clamped to 1 tick) against the pose after the server tick.
 - Version `0.7.0-rc.1` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.2
+
+- A piloted passenger drops its seat. The next tick stores a new deck offset only while the car is still on the hull, so releasing on a new spot keeps that spot and releasing off the hull does not snap the car back. A correction past the step cap drops the seat too, and the following tick can carry from where the car actually is.
+- Seats for removed passengers are dropped and do not hold one of the 8 slots. `forgetDimension` drops that dimension's seats.
+- Version `0.7.0-rc.2` jar. Still not published to Modrinth or CurseForge.
