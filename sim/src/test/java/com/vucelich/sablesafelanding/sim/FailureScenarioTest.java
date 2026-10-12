@@ -172,6 +172,15 @@ class FailureScenarioTest {
         assertEquals(2, RescueSite.columnStride(1024, 256));
         assertEquals(16, RescueSite.columnStride(256L * 256L, 256));
         assertEquals(1, RescueSite.columnStride(0, 256));
+
+        assertEquals(1, RescueSite.columnStride(16, 16, 256));
+        assertTrue(RescueSite.sampleCount(16, 16, RescueSite.columnStride(16, 16, 256)) <= 256);
+        // The area stride of a 1000 by 1 floor is 2, which is 500 reads and drops the far half.
+        assertEquals(2, RescueSite.columnStride(1000L, 256));
+        int longStride = RescueSite.columnStride(1000, 1, 256);
+        assertTrue(longStride > 2);
+        assertTrue(RescueSite.sampleCount(1000, 1, longStride) <= 256);
+        assertTrue(RescueSite.sampleCount(1000, 1000, RescueSite.columnStride(1000, 1000, 256)) <= 256);
     }
 
     @Test

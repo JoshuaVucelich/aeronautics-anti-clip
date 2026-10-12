@@ -22,12 +22,43 @@ public final class RescueSite {
     /**
      * Columns between samples on a bottom layer of {@code columns} cells, capped near {@code cap} reads.
      * {@code ceil(sqrt(columns / cap))}, and at least 1 so a tiny hull is read cell by cell.
+     * A long floor needs {@link #columnStride(int, int, int)} instead: this area formula under-samples
+     * one axis and the other axis then blows past the cap.
      */
     public static int columnStride(long columns, int cap) {
         if (columns < 1 || cap < 1) {
             return 1;
         }
         return Math.max(1, (int) Math.ceil(Math.sqrt(columns / (double) cap)));
+    }
+
+    /**
+     * Smallest stride whose samples on a {@code width} by {@code depth} floor stay within {@code cap}.
+     * A 1000 by 1 hull is stride 4 (250 reads), not the area stride of 2 (500 reads).
+     */
+    public static int columnStride(int width, int depth, int cap) {
+        if (width < 1 || depth < 1 || cap < 1) {
+            return 1;
+        }
+        int stride = 1;
+        int limit = Math.max(width, depth);
+        while (sampleCount(width, depth, stride) > cap && stride < limit) {
+            stride++;
+        }
+        return stride;
+    }
+
+    /** Cells visited by stepping {@code stride} across both axes, including the first of each. */
+    public static long sampleCount(int width, int depth, int stride) {
+        if (width < 1 || depth < 1) {
+            return 0;
+        }
+        int step = Math.max(1, stride);
+        return (long) axisSamples(width, step) * axisSamples(depth, step);
+    }
+
+    private static int axisSamples(int span, int stride) {
+        return (span + stride - 1) / stride;
     }
 
     /**

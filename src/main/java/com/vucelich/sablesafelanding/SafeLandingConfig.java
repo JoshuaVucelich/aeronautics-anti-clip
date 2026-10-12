@@ -87,13 +87,22 @@ public final class SafeLandingConfig {
             return;
         }
         int previous = CONFIG_VERSION.getAsInt();
-        ConfigMigration.Result result = ConfigMigration.migrate(previous, CARRY.getAsBoolean());
+        boolean carryWasOn = CARRY.getAsBoolean();
+        ConfigMigration.Result result = ConfigMigration.migrate(previous, carryWasOn);
         if (!result.changed()) {
             return;
         }
         CARRY.set(result.carry());
         CONFIG_VERSION.set(result.version());
         CONFIG_VERSION.save();
+        if (carryWasOn) {
+            SableSafeLanding.LOGGER.info(
+                    "Stamped configVersion {} to {} (carry was already on)",
+                    previous,
+                    result.version()
+            );
+            return;
+        }
         SableSafeLanding.LOGGER.info("Migrated configVersion {} to {} and set carry=true", previous, result.version());
     }
 

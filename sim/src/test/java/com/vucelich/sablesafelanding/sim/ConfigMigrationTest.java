@@ -21,5 +21,12 @@ class ConfigMigrationTest {
         ConfigMigration.Result current = ConfigMigration.migrate(ConfigMigration.CARRY_ON, true);
         assertTrue(current.carry());
         assertFalse(current.changed());
+
+        // A fresh file is born at version 0 with carry already on. It is stamped once so a
+        // later carry=false is kept, and carry itself is not flipped.
+        ConfigMigration.Result fresh = ConfigMigration.migrate(0, true);
+        assertEquals(ConfigMigration.CARRY_ON, fresh.version());
+        assertTrue(fresh.carry());
+        assertTrue(fresh.changed());
     }
 }
