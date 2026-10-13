@@ -28,3 +28,11 @@ The sim module does not start Minecraft or link Rapier.
 The jar is `build/libs/sable_safe_landing-<version>.jar`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
 
 This project is not published to Modrinth or CurseForge.
+
+## Download
+
+Not on Modrinth yet.
+
+## License
+
+[MIT](LICENSE). Copyright (c) 2026 Joshua Vucelich.
