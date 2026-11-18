@@ -32,7 +32,7 @@ public final class AntiClipCommand {
         AntiClipConfig config = SafeLandingConfig.snapshot();
         String text = String.format(
                 java.util.Locale.ROOT,
-                "Aeronautics Anti-Clip %s enabled=%s carry=%s feed=%s sweep=%s voidRescue=%s bedrockRescue=%s locks=%d held=%d removalHook=%s",
+                "Aeronautics Anti-Clip %s enabled=%s carry=%s feed=%s sweep=%s voidRescue=%s bedrockRescue=%s wheelContact=%s wheelDeckHits=%d locks=%d held=%d removalHook=%s",
                 SafeLandingConfig.VERSION,
                 config.enabled(),
                 config.carry(),
@@ -40,6 +40,8 @@ public final class AntiClipCommand {
                 config.sweep(),
                 config.voidRescue(),
                 config.bedrockRescue(),
+                WheelContactRuntime.switchOn(),
+                WheelContactRuntime.deckHits(),
                 CarryRuntime.lockCount(),
                 CarryRuntime.heldCount(),
                 VoidRescueRuntime.removalHookSeen()

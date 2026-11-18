@@ -1,6 +1,6 @@
 # Failure scenarios
 
-Aeronautics vehicles are Sable sub-levels. The loss that started this mod is a car that fell through a moving Create elevator, then through bedrock. A second loss is an airship deleted after its grabbers froze. This note walks through how those happen and what `0.7.0-rc.3` does about each one.
+Aeronautics vehicles are Sable sub-levels. The loss that started this mod is a car that fell through a moving Create elevator, then through bedrock. A second loss is an airship deleted after its grabbers froze. This note walks through how those happen and what `0.7.0-rc.4` does about each one.
 
 The master switch is the config key `enabled` (default true). `/anticlip off` and `/anticlip on` flip it and save the file. `/anticlip status` prints the switch, the feature flags, how many carry locks are held, and whether the Sable removal hook has run. Off means no rescue, no collider feed, no carry, and no sweep. Disarm clears `sable$initialized` on every claim in the level, including a contraption that was displaced before its collider was uploaded. Turning the feed off in the config does the same restore. Sable's next tick adds its own kinematic collider again. Mixin injects use `require = 0`, the mixin config is not required, and each inject is wrapped so a missing target or a thrown callback logs and returns. Those warnings are limited to one every five seconds. The server tick is not crashed by a Sable or Create mismatch.
 
@@ -13,6 +13,10 @@ A kinematic deck pushes a dynamic body up and does not pull it down. Carry is th
 - A stall (anchor and angle idle) still releases after 10 ticks, so a stopped elevator does not glue the car. Motion, including a reverse, clears that streak. The stored offset is applied at the deck's current pose, so a reverse that stays inside the step cap follows. It does not keep the old direction.
 - Contact is a bottom face on a block top. A side hit from a drill, harvester, saw, or train does not capture. Trains, drills, harvesters, and ploughs are not contraption kinds this mod feeds or carries. A car standing on a gantry platform still is.
 - Two cars on one deck are two locks. New captures examine at most 32 ships a tick, rotating through the list, and stop once 32 locks are held. Ships already locked are still maintained.
+
+## Wheels through an elevator deck
+
+A car with Offroad wheels driven onto an elevator rests on the deck with its body, and its wheels sink through the planks. The wheel mount finds the ground with `Level.clip`, and Sable's clip does not see contraption blocks. With no ground under the wheels there is no suspension and no drive, so the car sits on its hull and cannot drive on or off. `wheelContact` (default on) casts the same ray through nearby contraption blocks and returns the deck when it is closer. Wheels on a deck also count as carry contact. With it off, the old behavior returns. Contraptions that are themselves inside a sub-level are not tested.
 
 ## Airship deleted because grabbers froze
 

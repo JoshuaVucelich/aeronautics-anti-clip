@@ -75,3 +75,11 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - A level tick prunes seats only in that dimension. A Nether or End tick no longer clears every Overworld seat.
 - A car that leaves the hull drops its seat. A child that takes its own lock, or whose level is no longer the one being ticked, drops its seat too.
 - Version `0.7.0-rc.3` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.4
+
+- Offroad wheel rays land on Create contraption decks. Before this, a car's body rested on an elevator deck while its wheels sank through it, so it could not drive on or off. Config `wheelContact`, default on.
+- Wheels on a deck count as carry contact, so a car parked on its wheels on a bearing deck turns with it.
+- `/anticlip status` prints `wheelContact` and `wheelDeckHits`.
+- Repro: `WheelContactTest` (ray bounds, nearby check, closer hit wins). Live trial: `-Dsable_safe_landing.wheels=true`.
+- Version `0.7.0-rc.4` jar. Still not published to Modrinth or CurseForge.
