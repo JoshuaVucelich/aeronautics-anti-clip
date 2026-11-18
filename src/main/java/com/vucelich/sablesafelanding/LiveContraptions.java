@@ -48,6 +48,9 @@ public final class LiveContraptions {
         if (live != null) {
             live.remove(entity);
         }
+        if (!event.getLevel().isClientSide()) {
+            DeckShapes.forget(entity.getUUID());
+        }
     }
 
     public static void onUnload(LevelEvent.Unload event) {
