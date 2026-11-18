@@ -37,6 +37,18 @@ public final class ColliderFeedRuntime {
     /** Claimed contraptions, including ones whose collider was never uploaded. */
     private static final Map<String, AbstractContraptionEntity> CLAIMS = new HashMap<>();
     private static final Set<String> KINEMATIC_LOGGED = new HashSet<>();
+    /** Game tick each dimension was last planned. Later physics substeps in that tick skip it. */
+    private static final Map<String, Long> SYNCED_AT = new HashMap<>();
+    /** Shape hash per contraption, kept until its block count changes or it is rechecked. */
+    private static final Map<Contraption, long[]> HASHES = new java.util.WeakHashMap<>();
+    /** Contraptions whose collider could not be built, with the shape hash that failed. */
+    private static final Map<String, Long> FAILED = new HashMap<>();
+    /** Ticks between rehashes of an unchanged block count, so a swapped block still rebuilds. */
+    private static final long REHASH_TICKS = 1_200;
+    /** A settled dimension is fully re-planned at least this often. */
+    private static final long REPLAN_TICKS = 20;
+    /** Per dimension: the live set it was last planned for, when, and whether every slot was a keep. */
+    private static final Map<String, long[]> PLANNED = new HashMap<>();
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static boolean deferredWarning;
 
@@ -114,10 +126,16 @@ public final class ColliderFeedRuntime {
         CLAIMED.clear();
         CLAIMS.clear();
         KINEMATIC_LOGGED.clear();
+        SYNCED_AT.clear();
+        PLANNED.clear();
+        HASHES.clear();
+        FAILED.clear();
     }
 
     public static void forgetDimension(String dimension) {
         PLANNERS.remove(dimension);
+        SYNCED_AT.remove(dimension);
+        PLANNED.remove(dimension);
         Map<String, FedContraptionCollider> fed = FED.remove(dimension);
         if (fed != null) {
             HOOKED.removeAll(fed.keySet());
@@ -153,6 +171,15 @@ public final class ColliderFeedRuntime {
     }
 
     public static void onPrePhysics(ForgeSablePrePhysicsTickEvent event) {
+        long start = System.nanoTime();
+        try {
+            prePhysics(event);
+        } finally {
+            PerfMeter.add(PerfMeter.Part.FEED, System.nanoTime() - start);
+        }
+    }
+
+    private static void prePhysics(ForgeSablePrePhysicsTickEvent event) {
         SubLevelPhysicsSystem system = event.getPhysicsSystem();
         if (system == null || !(system.getLevel() instanceof ServerLevel level)) {
             return;
@@ -166,6 +193,21 @@ public final class ColliderFeedRuntime {
             // A config edit can turn the master switch or the feed off without the command.
             if (!config.enabled() || !config.feedColliders()) {
                 disarm(level);
+                return;
+            }
+            String dimension = level.dimension().location().toString();
+            Long synced = SYNCED_AT.get(dimension);
+            if (synced != null && synced == level.getGameTime()) {
+                // Planned this tick already. The kinematic samples are per game tick too.
+                return;
+            }
+            SYNCED_AT.put(dimension, level.getGameTime());
+            long[] planned = PLANNED.get(dimension);
+            long now = level.getGameTime();
+            if (planned != null && planned[2] == 1L && planned[0] == liveKey(level)
+                    && now >= planned[1] && now - planned[1] < REPLAN_TICKS) {
+                // Same contraptions as last tick and every one already fed: only the motion samples.
+                sample(level);
                 return;
             }
             sync(level, system.getPipeline());
@@ -364,8 +406,9 @@ public final class ColliderFeedRuntime {
         Map<String, AbstractContraptionEntity> entities = new HashMap<>();
         List<FeedRequest> requests = new ArrayList<>();
         int seen = 0;
-        for (Entity candidate : level.getAllEntities()) {
-            if (!(candidate instanceof AbstractContraptionEntity entity)) {
+        long now = level.getGameTime();
+        for (AbstractContraptionEntity entity : LiveContraptions.in(level)) {
+            if (entity == null || entity.isRemoved() || entity.level() != level) {
                 continue;
             }
             if (seen++ >= MAX_CONTRAPTIONS) {
@@ -377,12 +420,49 @@ public final class ColliderFeedRuntime {
                 continue;
             }
             String id = entity.getUUID().toString();
+            long hash = shapeHash(contraption, now);
+            Long failed = FAILED.get(id);
+            if (failed != null && failed == hash) {
+                // This shape could not be built before. Do not rebuild it every tick.
+                continue;
+            }
+            FAILED.remove(id);
             entities.put(id, entity);
             boolean inWorld = Sable.HELPER.getContaining(entity) == null;
-            requests.add(new FeedRequest(id, kind, ContraptionKinds.shapeHash(contraption), inWorld, entity.isAlive()));
+            requests.add(new FeedRequest(id, kind, hash, inWorld, entity.isAlive()));
         }
+        boolean settled = true;
         for (FeedAction action : planner.plan(requests, config.feedColliders())) {
+            if (action.type() != FeedAction.Type.KEEP) {
+                settled = false;
+            }
             apply(pipeline, planner, fed, entities, action);
+        }
+        for (FeedRequest request : requests) {
+            if (request.inWorld() && !fed.containsKey(request.id())) {
+                // Waiting for its claim or its collider: keep planning every tick.
+                settled = false;
+            }
+        }
+        PLANNED.put(dimension, new long[]{liveKey(level), now, settled ? 1L : 0L});
+        sample(level);
+    }
+
+    /** Identity of the live contraption set: its size and the entities in it. */
+    private static long liveKey(ServerLevel level) {
+        java.util.Set<AbstractContraptionEntity> live = LiveContraptions.in(level);
+        long key = live.size();
+        for (AbstractContraptionEntity entity : live) {
+            key += 0x9E3779B97F4A7C15L * System.identityHashCode(entity);
+        }
+        return key;
+    }
+
+    /** Once per game tick: each fed collider records where its contraption is. */
+    private static void sample(ServerLevel level) {
+        Map<String, FedContraptionCollider> fed = FED.get(level.dimension().location().toString());
+        if (fed == null || fed.isEmpty()) {
+            return;
         }
         long time = level.getGameTime();
         for (Map.Entry<String, FedContraptionCollider> entry : fed.entrySet()) {
@@ -422,9 +502,18 @@ public final class ColliderFeedRuntime {
                 if (action.type() == FeedAction.Type.REBUILD) {
                     remove(pipeline, fed, action.id());
                 }
+                long buildStart = System.nanoTime();
                 FedContraptionCollider collider = entity == null ? null : FedContraptionCollider.tryCreate(entity);
+                if (collider != null) {
+                    SableSafeLanding.LOGGER.info("LIVE feed collider {} blocks={} ms={}", action.id(),
+                            entity.getContraption().getBlocks().size(),
+                            String.format(java.util.Locale.ROOT, "%.2f", (System.nanoTime() - buildStart) / 1_000_000.0));
+                }
                 if (collider == null || pipeline == null) {
                     planner.forget(action.id());
+                    if (entity != null && collider == null) {
+                        FAILED.put(action.id(), action.shapeHash());
+                    }
                     return;
                 }
                 try {
@@ -439,6 +528,21 @@ public final class ColliderFeedRuntime {
             case KEEP -> {
             }
         }
+    }
+
+    /**
+     * The contraption's shape hash. Recomputed when its block count changes, and otherwise at
+     * most every {@link #REHASH_TICKS}, instead of every physics substep.
+     */
+    private static long shapeHash(Contraption contraption, long now) {
+        int size = contraption.getBlocks().size();
+        long[] cached = HASHES.get(contraption);
+        if (cached != null && cached[0] == size && now - cached[2] < REHASH_TICKS && now >= cached[2]) {
+            return cached[1];
+        }
+        long hash = ContraptionKinds.shapeHash(contraption);
+        HASHES.put(contraption, new long[]{size, hash, now});
+        return hash;
     }
 
     private static void remove(PhysicsPipeline pipeline, Map<String, FedContraptionCollider> fed, String id) {

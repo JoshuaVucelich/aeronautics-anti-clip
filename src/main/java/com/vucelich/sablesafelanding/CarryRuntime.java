@@ -4,12 +4,14 @@ import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.Contraption;
 import com.simibubi.create.content.contraptions.ControlledContraptionEntity;
 import com.vucelich.sablesafelanding.sim.Aabb;
-import com.vucelich.sablesafelanding.sim.AabbMerger;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import com.vucelich.sablesafelanding.sim.AntiClipStep;
 import com.vucelich.sablesafelanding.sim.CarryBroadphase;
 import com.vucelich.sablesafelanding.sim.CarryBudget;
 import com.vucelich.sablesafelanding.sim.CarryGate;
+import com.vucelich.sablesafelanding.sim.DeckIndex;
+import com.vucelich.sablesafelanding.sim.GridMerger;
+import com.vucelich.sablesafelanding.sim.TickBudget;
 import com.vucelich.sablesafelanding.sim.PassengerBook;
 import com.vucelich.sablesafelanding.sim.VelocityClamp;
 import com.vucelich.sablesafelanding.sim.DeckContact;
@@ -87,6 +89,19 @@ public final class CarryRuntime {
     private static final PassengerBook SEATS = new PassengerBook();
     private static final Map<String, CachedSupports> SUPPORT_CACHE = new HashMap<>();
     private static final Map<String, CachedSupports> BLOCK_CACHE = new HashMap<>();
+    /** Game tick a deck last moved, per dimension and contraption. */
+    private static final Map<String, Long> MOVED_AT = new HashMap<>();
+    /** The last deck shape built for a contraption, reused when the tick budget runs out. */
+    private static final Map<String, List<SupportMotion>> LAST_SHAPES = new HashMap<>();
+    private static final Map<String, TickBudget> BUDGETS = new HashMap<>();
+    private static final Map<String, CachedReaches> REACHES = new HashMap<>();
+    private static final Set<String> TRUNCATION_LOGGED = new HashSet<>();
+    /** A deck that moved within this many ticks still counts as moving for the deck shapes. */
+    private static final long ACTIVE_TICKS = 40;
+    /** Most deck blocks turned into shapes for one contraption in one tick. */
+    private static final int MAX_REGION_BLOCKS = 16_384;
+    /** Most ships looked at for the deck reach test in one tick. */
+    private static final int MAX_REACH_SHIPS = 256;
     private static final Set<String> PLACEMENT_LOGGED = new HashSet<>();
     private static final RateLimiter LAG_LOGS = new RateLimiter(5_000_000_000L);
     private static final Field JUMPING = jumpingField();
@@ -188,10 +203,22 @@ public final class CarryRuntime {
     private record CachedSupports(long time, List<SupportMotion> supports) {
     }
 
+    private record CachedReaches(long time, List<Aabb> boxes) {
+    }
+
     private CarryRuntime() {
     }
 
     public static void onPrePhysics(ForgeSablePrePhysicsTickEvent event) {
+        long start = System.nanoTime();
+        try {
+            prePhysics(event);
+        } finally {
+            PerfMeter.add(PerfMeter.Part.CARRY_PHYSICS, System.nanoTime() - start);
+        }
+    }
+
+    private static void prePhysics(ForgeSablePrePhysicsTickEvent event) {
         SubLevelPhysicsSystem system = event.getPhysicsSystem();
         if (system == null || !(system.getLevel() instanceof ServerLevel level)) {
             return;
@@ -239,6 +266,15 @@ public final class CarryRuntime {
      * and a drift-threshold placement all happen here, once per game tick.
      */
     public static void onServerTick(ServerTickEvent.Post event) {
+        long start = System.nanoTime();
+        try {
+            serverTick(event);
+        } finally {
+            PerfMeter.add(PerfMeter.Part.CARRY_TICK, System.nanoTime() - start);
+        }
+    }
+
+    private static void serverTick(ServerTickEvent.Post event) {
         if (!event.getServer().isSameThread()) {
             return;
         }
@@ -263,6 +299,12 @@ public final class CarryRuntime {
         SEATS.clear();
         SUPPORT_CACHE.clear();
         BLOCK_CACHE.clear();
+        MOVED_AT.clear();
+        LAST_SHAPES.clear();
+        BUDGETS.clear();
+        REACHES.clear();
+        TRUNCATION_LOGGED.clear();
+        DeckShapes.clear();
         PLACEMENT_LOGGED.clear();
         WheelContactRuntime.clear();
         captureCursor = 0;
@@ -273,7 +315,11 @@ public final class CarryRuntime {
         SAMPLES.keySet().removeIf(key -> key.startsWith(prefix));
         LOCKS.keySet().removeIf(key -> key.startsWith(prefix));
         BLOCK_CACHE.keySet().removeIf(key -> key.startsWith(prefix));
+        MOVED_AT.keySet().removeIf(key -> key.startsWith(prefix));
+        LAST_SHAPES.keySet().removeIf(key -> key.startsWith(prefix));
         SUPPORT_CACHE.remove(dimension);
+        BUDGETS.remove(dimension);
+        REACHES.remove(dimension);
         SEATS.forgetDimension(dimension);
     }
 
@@ -311,7 +357,9 @@ public final class CarryRuntime {
             return;
         }
         String dimension = level.dimension().location().toString();
-        prunePassengers(dimension, container);
+        if (!SEATS.isEmpty()) {
+            prunePassengers(dimension, container);
+        }
         String prefix = dimension + "\0";
         List<DeckBox> decks = deckBoxes(level, dimension);
         List<String> drop = new ArrayList<>();
@@ -363,9 +411,21 @@ public final class CarryRuntime {
         for (String key : drop) {
             LOCKS.remove(key);
         }
+        if (decks.isEmpty()) {
+            // No contraption deck in this level: nothing can be captured.
+            return;
+        }
         List<ServerSubLevel> unlocked = new ArrayList<>();
         for (ServerSubLevel ship : container.getAllSubLevels()) {
-            if (ship.isRemoved() || piloting(level, ship) || ship.getLevel() != level) {
+            if (ship.isRemoved() || ship.getLevel() != level) {
+                continue;
+            }
+            // Only a ship on or next to a deck can be captured. The bounds test is cheap; the
+            // pilot check and everything after it run only for those ships.
+            if (!nearAnyDeck(level, ship, decks)) {
+                continue;
+            }
+            if (piloting(level, ship)) {
                 continue;
             }
             String key = prefix + ship.getUniqueId();
@@ -404,6 +464,16 @@ public final class CarryRuntime {
                 if (!onWheels && !query.intersects(deck.bounds)) {
                     continue;
                 }
+                // A stopped deck must not grab the car again. Idle release would otherwise be undone
+                // on the next tick, and a drive off the elevator would be pulled back. Checked before
+                // the block test so a ship parked on a stopped deck costs no block work.
+                Sample deckSample = sampleOf(dimension, deck.entity, level.getGameTime());
+                boolean deckMoving = deckSample != null
+                        && (deckSample.translation.length() >= CarryGate.IDLE_ANCHOR
+                        || Math.abs(deckSample.angleRadians) >= CarryGate.IDLE_ANGLE);
+                if (!deckMoving) {
+                    continue;
+                }
                 // Block test is only this contraption. A ship that missed every box never gets here.
                 BlockContact.Touch touch = onWheels
                         ? new BlockContact.Touch(CarryGate.Contact.RESTING, wheelDeck)
@@ -413,15 +483,6 @@ public final class CarryRuntime {
                                 CarryGate.CAPTURE_GAP
                         );
                 if (touch.contact() != CarryGate.Contact.RESTING || touch.supportId() == null) {
-                    continue;
-                }
-                // A stopped deck must not grab the car again. Idle release would otherwise be undone
-                // on the next tick, and a drive off the elevator would be pulled back.
-                Sample sample = SAMPLES.get(prefix + touch.supportId());
-                boolean deckMoving = sample != null
-                        && (sample.translation.length() >= CarryGate.IDLE_ANCHOR
-                        || Math.abs(sample.angleRadians) >= CarryGate.IDLE_ANGLE);
-                if (!deckMoving) {
                     continue;
                 }
                 // The first resting tick starts a provisional lock. It is not placed until contact
@@ -439,6 +500,22 @@ public final class CarryRuntime {
     }
 
     private record DeckBox(AbstractContraptionEntity entity, Aabb bounds) {
+    }
+
+    /** The capture's own broadphase, or wheels standing on one of these decks. */
+    private static boolean nearAnyDeck(ServerLevel level, ServerSubLevel ship, List<DeckBox> decks) {
+        String wheelDeck = WheelContactRuntime.wheelSupport(ship.getUniqueId(), level.getGameTime());
+        Aabb hull = shipBox(ship);
+        Aabb query = hull == null ? null : hull.expand(CarryBroadphase.INFLATE);
+        for (DeckBox deck : decks) {
+            if (query != null && query.intersects(deck.bounds)) {
+                return true;
+            }
+            if (wheelDeck != null && wheelDeck.equals(deck.entity.getUUID().toString())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1087,7 +1164,7 @@ public final class CarryRuntime {
         if (cached != null && cached.time == time) {
             return cached.supports;
         }
-        List<SupportMotion> built = blocks(dimension, entity, time);
+        List<SupportMotion> built = blocks(level, dimension, entity, time);
         BLOCK_CACHE.put(key, new CachedSupports(time, built));
         return built;
     }
@@ -1108,7 +1185,18 @@ public final class CarryRuntime {
             if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
                 break;
             }
-            supports.addAll(blocks(dimension, entity, time));
+            // The motion sample is a few reads and is kept for every deck, so a deck that a ship
+            // reaches later already knows how fast it is moving.
+            sampleOf(dimension, entity, time);
+            if (!active(level, dimension, entity, time)) {
+                // A ship is resting on a stopped deck: build the deck index now, inside the budget,
+                // so the carry is ready the tick the deck starts to move. Built once per shape.
+                if (!DeckShapes.ready(entity) && !nearReaches(level, entity).isEmpty()) {
+                    DeckShapes.index(entity, budget(level));
+                }
+                continue;
+            }
+            supports.addAll(blocksCached(level, dimension, entity));
         }
         SUPPORT_CACHE.put(dimension, new CachedSupports(time, supports));
         return supports;
@@ -1121,8 +1209,8 @@ public final class CarryRuntime {
         }
         List<AbstractContraptionEntity> scanned = new ArrayList<>();
         int seen = 0;
-        for (Entity candidate : level.getAllEntities()) {
-            if (!(candidate instanceof AbstractContraptionEntity entity)) {
+        for (AbstractContraptionEntity entity : LiveContraptions.in(level)) {
+            if (entity == null || entity.isRemoved() || entity.level() != level) {
                 continue;
             }
             if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
@@ -1180,58 +1268,261 @@ public final class CarryRuntime {
      * volumes, so later substeps and the post tick test contact against the pose the ship is
      * still standing on. Placement uses that same sample, which is where the kinematic collider is.
      */
-    private static List<SupportMotion> blocks(String dimension, AbstractContraptionEntity entity, long gameTime) {
+    private static List<SupportMotion> blocks(ServerLevel level, String dimension, AbstractContraptionEntity entity, long gameTime) {
         Contraption contraption = entity.getContraption();
         if (contraption == null || contraption.getBlocks().isEmpty()) {
             return List.of();
+        }
+        String id = entity.getUUID().toString();
+        String key = dimension + "\0" + id;
+        Sample sample = sampleOf(dimension, entity, gameTime);
+        if (sample == null) {
+            return List.of();
+        }
+        // Only the part of the deck a ship can reach this tick is turned into shapes. A deck with
+        // no ship on or next to it has none and costs nothing more.
+        List<Aabb> reaches = nearReaches(level, entity);
+        if (reaches.isEmpty()) {
+            LAST_SHAPES.remove(key);
+            return List.of();
+        }
+        TickBudget budget = budget(level);
+        List<SupportMotion> last = LAST_SHAPES.getOrDefault(key, List.of());
+        if (!budget.allows()) {
+            return last;
+        }
+        DeckIndex index = DeckShapes.index(entity, budget);
+        if (index == null || !budget.allows()) {
+            return last;
+        }
+        long start = System.nanoTime();
+        Vec3 pivot = new Vec3(sample.x + 0.5, sample.y + 0.5, sample.z + 0.5);
+        net.minecraft.world.phys.Vec3 anchorNow = new net.minecraft.world.phys.Vec3(sample.x, sample.y, sample.z);
+        long[] cells = new long[256];
+        int count = 0;
+        boolean truncated = false;
+        Set<Long> seen = reaches.size() > 1 ? new HashSet<>() : null;
+        for (Aabb reach : reaches) {
+            int[] region = localRegion(entity, reach, anchorNow);
+            DeckIndex.Region found = index.query(region[0], region[1], region[2], region[3], region[4], region[5],
+                    MAX_REGION_BLOCKS - count);
+            truncated |= found.truncated();
+            for (int i = 0; i < found.count(); i++) {
+                long cell = found.cells()[i];
+                if (seen != null && !seen.add(cell)) {
+                    continue;
+                }
+                if (count == cells.length) {
+                    cells = java.util.Arrays.copyOf(cells, cells.length * 2);
+                }
+                cells[count++] = cell;
+            }
+            if (count >= MAX_REGION_BLOCKS) {
+                truncated = true;
+                break;
+            }
+        }
+        if (truncated && TRUNCATION_LOGGED.add(key)) {
+            SableSafeLanding.LOGGER.info("LIVE deck shape {} capped at {} blocks near ships", id, MAX_REGION_BLOCKS);
+        }
+        // A deck turned off a quarter turn only joins blocks along its rotation axis, so each
+        // rotated box encloses the same space the per-block boxes did.
+        Direction.Axis locked = turnedAxis(entity);
+        List<Aabb> local = locked == null
+                ? GridMerger.merge(cells, count)
+                : GridMerger.merge(cells, count, locked == Direction.Axis.X, locked == Direction.Axis.Y, locked == Direction.Axis.Z);
+        List<SupportMotion> supports = new ArrayList<>(local.size());
+        for (Aabb box : local) {
+            Aabb world = Aabb.enclosing(corners(entity, box, anchorNow, 1.0f));
+            supports.add(new SupportMotion(id, world, sample.translation, pivot, sample.axis, sample.angleRadians));
+        }
+        budget.charge(System.nanoTime() - start);
+        LAST_SHAPES.put(key, supports);
+        return supports;
+    }
+
+    /**
+     * The deck's motion since the previous game tick, sampled once per tick. A few field reads,
+     * no block work.
+     */
+    private static Sample sampleOf(String dimension, AbstractContraptionEntity entity, long gameTime) {
+        if (entity == null) {
+            return null;
         }
         net.minecraft.world.phys.Vec3 anchor = entity.getAnchorVec();
         float angleNow = entity instanceof ControlledContraptionEntity controlled ? controlled.getAngle(1.0f) : 0.0f;
         String id = entity.getUUID().toString();
         String key = dimension + "\0" + id;
         Sample previous = SAMPLES.get(key);
-        Sample sample;
         if (previous != null && previous.time == gameTime) {
-            sample = previous;
-        } else {
-            Vec3 translation = Vec3.ZERO;
-            double radians = 0.0;
-            Vec3 axis = new Vec3(0.0, 1.0, 0.0);
-            if (previous != null) {
-                Vec3 raw = new Vec3(anchor.x - previous.x, anchor.y - previous.y, anchor.z - previous.z);
-                if (raw.length() <= AntiClipStep.MAX_RIDE_STEP) {
-                    translation = raw;
-                }
-                if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
-                    axis = axis(controlled.getRotationAxis());
-                    float degrees = Mth.wrapDegrees(angleNow - previous.angle);
-                    if (Math.abs(degrees) <= AntiClipStep.MAX_RIDE_DEGREES) {
-                        radians = Math.toRadians(degrees);
-                    }
-                }
-                if (raw.length() > 1.0e-4 || Math.abs(Mth.wrapDegrees(angleNow - previous.angle)) > 0.05f) {
-                    PlatformTrace.note(id, String.format(Locale.ROOT,
-                            "shift=(%.3f,%.3f,%.3f) applied=(%.3f,%.3f,%.3f) angleDeg=%.2f",
-                            raw.x(), raw.y(), raw.z(),
-                            translation.x(), translation.y(), translation.z(),
-                            Mth.wrapDegrees(angleNow - previous.angle)));
+            return previous;
+        }
+        Vec3 translation = Vec3.ZERO;
+        double radians = 0.0;
+        Vec3 axis = new Vec3(0.0, 1.0, 0.0);
+        if (previous != null && previous.time < gameTime) {
+            Vec3 raw = new Vec3(anchor.x - previous.x, anchor.y - previous.y, anchor.z - previous.z);
+            if (raw.length() <= AntiClipStep.MAX_RIDE_STEP) {
+                translation = raw;
+            }
+            if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
+                axis = axis(controlled.getRotationAxis());
+                float degrees = Mth.wrapDegrees(angleNow - previous.angle);
+                if (Math.abs(degrees) <= AntiClipStep.MAX_RIDE_DEGREES) {
+                    radians = Math.toRadians(degrees);
                 }
             }
-            sample = new Sample(gameTime, anchor.x, anchor.y, anchor.z, angleNow, translation, radians, axis);
-            SAMPLES.put(key, sample);
+            if (raw.length() > 1.0e-4 || Math.abs(Mth.wrapDegrees(angleNow - previous.angle)) > 0.05f) {
+                PlatformTrace.note(id, String.format(Locale.ROOT,
+                        "shift=(%.3f,%.3f,%.3f) applied=(%.3f,%.3f,%.3f) angleDeg=%.2f",
+                        raw.x(), raw.y(), raw.z(),
+                        translation.x(), translation.y(), translation.z(),
+                        Mth.wrapDegrees(angleNow - previous.angle)));
+            }
         }
-        Vec3 pivot = new Vec3(sample.x + 0.5, sample.y + 0.5, sample.z + 0.5);
-        net.minecraft.world.phys.Vec3 anchorNow = new net.minecraft.world.phys.Vec3(sample.x, sample.y, sample.z);
+        if (translation.length() >= CarryGate.IDLE_ANCHOR || Math.abs(radians) >= CarryGate.IDLE_ANGLE) {
+            MOVED_AT.put(key, gameTime);
+        }
+        Sample sample = new Sample(gameTime, anchor.x, anchor.y, anchor.z, angleNow, translation, radians, axis);
+        SAMPLES.put(key, sample);
+        return sample;
+    }
+
+    /**
+     * True only while a ship is on or next to this deck and the deck has moved within
+     * {@link #ACTIVE_TICKS} or holds a ship. A bounds test, never a block scan.
+     */
+    private static boolean active(ServerLevel level, String dimension, AbstractContraptionEntity entity, long time) {
+        if (nearReaches(level, entity).isEmpty()) {
+            return false;
+        }
+        String id = entity.getUUID().toString();
+        Long moved = MOVED_AT.get(dimension + "\0" + id);
+        if (moved != null && time - moved <= ACTIVE_TICKS) {
+            return true;
+        }
+        String prefix = dimension + "\0";
+        for (Map.Entry<String, DeckLock> entry : LOCKS.entrySet()) {
+            if (entry.getKey().startsWith(prefix) && id.equals(entry.getValue().contraptionId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Reaches of ships whose box touches this deck's bounds. */
+    private static List<Aabb> nearReaches(ServerLevel level, AbstractContraptionEntity entity) {
+        Aabb bounds = broadphaseBounds(entity);
+        if (bounds == null) {
+            return List.of();
+        }
+        List<Aabb> near = null;
+        for (Aabb reach : shipReaches(level)) {
+            if (reach.intersects(bounds)) {
+                if (near == null) {
+                    near = new ArrayList<>(2);
+                }
+                near.add(reach);
+            }
+        }
+        return near == null ? List.of() : near;
+    }
+
+    /**
+     * Every ship's box grown by the broadphase margin, three blocks for wheels and suspension,
+     * and up to two ticks of its own speed. Built once per tick from Sable's bounds.
+     */
+    private static List<Aabb> shipReaches(ServerLevel level) {
+        String dimension = level.dimension().location().toString();
+        long time = level.getGameTime();
+        CachedReaches cached = REACHES.get(dimension);
+        if (cached != null && cached.time == time) {
+            return cached.boxes;
+        }
         List<Aabb> boxes = new ArrayList<>();
-        for (BlockPos pos : contraption.getBlocks().keySet()) {
-            Aabb local = new Aabb(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1.0, pos.getY() + 1.0, pos.getZ() + 1.0);
-            boxes.add(Aabb.enclosing(corners(entity, local, anchorNow, 1.0f)));
+        if (SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container) {
+            for (ServerSubLevel ship : container.getAllSubLevels()) {
+                if (boxes.size() >= MAX_REACH_SHIPS) {
+                    break;
+                }
+                if (ship.isRemoved() || ship.getLevel() != level) {
+                    continue;
+                }
+                Aabb hull = shipBox(ship);
+                if (hull == null) {
+                    continue;
+                }
+                Vector3d velocity = ship.latestLinearVelocity;
+                double speed = velocity == null || !Double.isFinite(velocity.length()) ? 0.0 : velocity.length();
+                boxes.add(hull.expand(CarryBroadphase.INFLATE + 3.0 + Math.min(16.0, speed * 0.1)));
+            }
         }
-        List<SupportMotion> supports = new ArrayList<>();
-        for (Aabb world : AabbMerger.merge(boxes)) {
-            supports.add(new SupportMotion(id, world, sample.translation, pivot, sample.axis, sample.angleRadians));
+        REACHES.put(dimension, new CachedReaches(time, boxes));
+        return boxes;
+    }
+
+    private static TickBudget budget(ServerLevel level) {
+        TickBudget budget = BUDGETS.computeIfAbsent(level.dimension().location().toString(), ignored -> new TickBudget());
+        // Keyed by the server tick, so the physics hook and the end-of-tick hook share one allowance.
+        budget.begin(level.getServer().getTickCount(), SafeLandingConfig.tickBudgetMicros());
+        return budget;
+    }
+
+    /** Deck shape time charged to this dimension's budget in its current tick. */
+    public static long budgetSpentNanos(String dimension) {
+        TickBudget budget = BUDGETS.get(dimension);
+        return budget == null ? 0L : budget.spentNanos();
+    }
+
+    /** Ticks in which deck shape work ran out of budget, all dimensions. */
+    public static long budgetExhaustedTicks() {
+        long total = 0;
+        for (TickBudget budget : BUDGETS.values()) {
+            total += budget.exhaustedTicks();
         }
-        return supports;
+        return total;
+    }
+
+    /** The world box mapped into the contraption's block grid, one block wider each way. */
+    private static int[] localRegion(AbstractContraptionEntity entity, Aabb world, net.minecraft.world.phys.Vec3 anchor) {
+        double minX = Double.POSITIVE_INFINITY;
+        double minY = Double.POSITIVE_INFINITY;
+        double minZ = Double.POSITIVE_INFINITY;
+        double maxX = Double.NEGATIVE_INFINITY;
+        double maxY = Double.NEGATIVE_INFINITY;
+        double maxZ = Double.NEGATIVE_INFINITY;
+        double[] xs = {world.minX(), world.maxX()};
+        double[] ys = {world.minY(), world.maxY()};
+        double[] zs = {world.minZ(), world.maxZ()};
+        for (double x : xs) {
+            for (double y : ys) {
+                for (double z : zs) {
+                    net.minecraft.world.phys.Vec3 local = entity.reverseRotation(
+                            new net.minecraft.world.phys.Vec3(x, y, z).subtract(anchor).subtract(ROTATION_OFFSET), 1.0f
+                    ).add(ROTATION_OFFSET);
+                    minX = Math.min(minX, local.x);
+                    minY = Math.min(minY, local.y);
+                    minZ = Math.min(minZ, local.z);
+                    maxX = Math.max(maxX, local.x);
+                    maxY = Math.max(maxY, local.y);
+                    maxZ = Math.max(maxZ, local.z);
+                }
+            }
+        }
+        return new int[]{
+                Mth.floor(minX) - 1, Mth.floor(minY) - 1, Mth.floor(minZ) - 1,
+                Mth.floor(maxX) + 1, Mth.floor(maxY) + 1, Mth.floor(maxZ) + 1
+        };
+    }
+
+    /** The rotation axis of a deck that is turned off a quarter turn, or null. */
+    private static Direction.Axis turnedAxis(AbstractContraptionEntity entity) {
+        if (!(entity instanceof ControlledContraptionEntity controlled) || controlled.getRotationAxis() == null) {
+            return null;
+        }
+        double angle = controlled.getAngle(1.0f);
+        double quarter = Math.abs(angle / 90.0 - Math.rint(angle / 90.0));
+        return quarter < 1.0e-4 ? null : controlled.getRotationAxis();
     }
 
     private static List<Vec3> corners(AbstractContraptionEntity entity, Aabb local, net.minecraft.world.phys.Vec3 anchor, float partial) {

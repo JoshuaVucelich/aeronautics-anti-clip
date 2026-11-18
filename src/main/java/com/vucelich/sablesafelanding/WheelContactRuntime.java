@@ -4,6 +4,7 @@ import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.Contraption;
 import com.vucelich.sablesafelanding.sim.Aabb;
 import com.vucelich.sablesafelanding.sim.RateLimiter;
+import com.vucelich.sablesafelanding.sim.TickBudget;
 import com.vucelich.sablesafelanding.sim.WheelContact;
 import dev.ryanhcode.sable.Sable;
 import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
@@ -59,6 +60,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@link ColliderFeedRuntime#MAX_CONTRAPTIONS}). Once per ship per tick that list is cut to the
  * contraptions that can reach the ship's wheel rays. A ray from a ship with none of those does
  * three map reads and returns. The wheel mount's ship is cached, so a ray does no Sable lookup.
+ * A ray that does reach a deck walks only the few block cells along the ray, never the whole
+ * contraption, and all deck rays in a level share the per-tick {@code tickBudgetMicros} cap.
+ * Past the cap a ray keeps Offroad's own result for the rest of that tick.
  */
 public final class WheelContactRuntime {
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
@@ -77,6 +81,11 @@ public final class WheelContactRuntime {
     private static final Map<Level, LevelBounds> BOUNDS = new ConcurrentHashMap<>();
     private static final Map<SubLevel, ShipCandidates> SHIPS = new ConcurrentHashMap<>();
     private static final Map<Object, SubLevel> MOUNT_SHIP = Collections.synchronizedMap(new WeakHashMap<>());
+    /** Per-level cap on deck ray time. Each level is only used from its own thread. */
+    private static final Map<Level, TickBudget> BUDGETS = Collections.synchronizedMap(new WeakHashMap<>());
+    /** A ground ray longer than this is not a suspension ray; it is left as Offroad cast it. */
+    private static final double MAX_RAY = 32.0;
+    private static final AtomicLong BUDGET_SKIPS = new AtomicLong();
 
     private static volatile Method heldItem;
     private static volatile Method radiusAccessor;
@@ -131,6 +140,11 @@ public final class WheelContactRuntime {
         return touch.contraptionId;
     }
 
+    /** Wheel deck rays left to Offroad because the tick budget ran out. Shown by /anticlip status. */
+    public static long budgetSkips() {
+        return BUDGET_SKIPS.get();
+    }
+
     /** Drops every cache and wheel touch. Called on server stop. */
     public static void clear() {
         WHEEL_TOUCH.clear();
@@ -145,6 +159,7 @@ public final class WheelContactRuntime {
             return;
         }
         BOUNDS.remove(level);
+        BUDGETS.remove(level);
         SHIPS.keySet().removeIf(ship -> ship == null || ship.getLevel() == level);
     }
 
@@ -172,10 +187,28 @@ public final class WheelContactRuntime {
             }
             List<Candidate> near = candidatesFor(level, ship, live);
             if (near.isEmpty()) {
+                // No deck near this ship: Offroad's own ray, nothing added.
                 return base;
             }
-            BlockHitResult deck = cast(level, context, base, ship, near, wheelMount);
-            return deck == null ? base : deck;
+            TickBudget budget = BUDGETS.computeIfAbsent(level, ignored -> new TickBudget());
+            long tickId = level instanceof net.minecraft.server.level.ServerLevel server
+                    ? server.getServer().getTickCount() : level.getGameTime();
+            budget.begin(tickId, SafeLandingConfig.tickBudgetMicros());
+            if (!budget.allows()) {
+                BUDGET_SKIPS.incrementAndGet();
+                return base;
+            }
+            long start = System.nanoTime();
+            try {
+                BlockHitResult deck = cast(level, context, base, ship, near, wheelMount);
+                return deck == null ? base : deck;
+            } finally {
+                long used = System.nanoTime() - start;
+                budget.charge(used);
+                if (!level.isClientSide()) {
+                    PerfMeter.add(PerfMeter.Part.WHEEL, used);
+                }
+            }
         } catch (RuntimeException ex) {
             if (FAILURE_LOGS.tryAcquire(System.nanoTime())) {
                 SableSafeLanding.LOGGER.warn("Wheel deck check failed; keeping the original ground ray: {}", ex.toString());
@@ -281,6 +314,9 @@ public final class WheelContactRuntime {
         // Offroad casts from the wheel in the ship's plot. Sable's clip moves it to the world the same way.
         Vec3 from = transform(pose, context.getFrom());
         Vec3 to = transform(pose, context.getTo());
+        if (from.distanceToSqr(to) > MAX_RAY * MAX_RAY) {
+            return null;
+        }
         Aabb ray = WheelContact.rayBounds(sim(from), sim(to));
         if (ray == null) {
             return null;
