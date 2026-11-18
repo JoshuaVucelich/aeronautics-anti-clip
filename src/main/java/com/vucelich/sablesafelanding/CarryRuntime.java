@@ -119,6 +119,8 @@ public final class CarryRuntime {
         private int idleTicks;
         private int missTicks;
         private int contactTicks;
+        /** The last placement gave the ship a ride velocity, so a stop has to clear it once. */
+        private boolean riding;
         private int takeoffTicks;
         private boolean confirmed;
         /** Log body velocity against the pose delta once, on the tick after the first teleport. */
@@ -503,6 +505,11 @@ public final class CarryRuntime {
             }
         }
         if (!lock.confirmed || lock.takeoffTicks > 0) {
+            // While the contact is being confirmed, already move with a sliding deck so a heavy
+            // ship does not sink onto it. Nothing is teleported until the confirm.
+            if (contact == CarryGate.Contact.RESTING && lock.takeoffTicks == 0) {
+                matchDeckSpeed(level, lock, ship);
+            }
             return true;
         }
         return place(level, lock, ship, shipId);
@@ -647,7 +654,13 @@ public final class CarryRuntime {
         double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
         // Same wrap as the ride sample and FedContraptionCollider. A 360-degree bearing wrap is one step.
         double angleStep = Math.toRadians(Mth.wrapDegrees(Math.toDegrees(angle - lock.lastPlacedAngle)));
-        if (!CarryGate.teleport(dx * dx + dy * dy + dz * dz, angleStep)) {
+        // An elevator, piston, or gantry this tick: place every tick and match the deck's speed.
+        Vec3 ride = sample != null && sample.time == level.getGameTime()
+                ? CarryGate.rideVelocity(sample.translation, sample.angleRadians)
+                : null;
+        // The deck just stopped: place once more and clear the ride velocity so the ship does not coast past.
+        boolean stopped = ride == null && lock.riding;
+        if (ride == null && !stopped && !CarryGate.teleport(dx * dx + dy * dy + dz * dz, angleStep)) {
             return true;
         }
         if (!CarryGate.safeStep(distance, angleStep)) {
@@ -671,6 +684,12 @@ public final class CarryRuntime {
             // Wake only for a drift correction. A parked deck never reaches this call.
             pipeline.wakeUp(ship);
             pipeline.teleport(ship, position, orientation);
+            if (ride != null) {
+                setRideVelocity(pipeline, ship, ride);
+            } else if (stopped) {
+                setRideVelocity(pipeline, ship, com.vucelich.sablesafelanding.sim.Vec3.ZERO);
+            }
+            lock.riding = ride != null;
         } else {
             ship.logicalPose().position().set(position);
             ship.logicalPose().orientation().set(orientation);
@@ -699,6 +718,37 @@ public final class CarryRuntime {
             );
         }
         return true;
+    }
+
+    /** Gives a ship the deck's velocity for the coming physics step, when the deck is sliding. */
+    private static void matchDeckSpeed(ServerLevel level, DeckLock lock, ServerSubLevel ship) {
+        Sample sample = SAMPLES.get(level.dimension().location() + "\0" + lock.contraptionId);
+        if (sample == null || sample.time != level.getGameTime()) {
+            return;
+        }
+        Vec3 ride = CarryGate.rideVelocity(sample.translation, sample.angleRadians);
+        PhysicsPipeline pipeline = pipeline(level);
+        if (ride == null || pipeline == null) {
+            return;
+        }
+        pipeline.wakeUp(ship);
+        setRideVelocity(pipeline, ship, ride);
+        lock.riding = true;
+    }
+
+    /**
+     * Rapier body velocity, not only Sable's pose-delta field. Without it the body keeps its own
+     * speed between placements, the suspension and gravity slow a heavy ship, and it trails the
+     * deck. Angular velocity is cleared too; the orientation is the placed one.
+     */
+    private static void setRideVelocity(PhysicsPipeline pipeline, ServerSubLevel ship, Vec3 ride) {
+        try {
+            pipeline.resetVelocity(ship);
+            pipeline.addLinearAndAngularVelocity(ship, new Vector3d(ride.x(), ride.y(), ride.z()), new Vector3d());
+            ship.latestLinearVelocity.set(ride.x(), ride.y(), ride.z());
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+        }
     }
 
     private static boolean capture(ServerLevel level, String dimension, ServerSubLevel ship, String key, String contraptionId) {

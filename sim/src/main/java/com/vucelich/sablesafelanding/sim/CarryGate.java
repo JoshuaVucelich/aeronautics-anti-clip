@@ -180,6 +180,28 @@ public final class CarryGate {
         return 0;
     }
 
+    /**
+     * True when the deck slid this tick without turning: an elevator, piston, or gantry. A held
+     * ship on such a deck is placed every tick and given the deck's velocity, so it moves at
+     * exactly the deck's speed. Waiting for {@link #DRIFT} let a heavy ship trail the deck and
+     * sink onto it between corrections.
+     */
+    public static boolean sliding(Vec3 translation, double angleRadians) {
+        if (translation == null || !translation.finite() || !Double.isFinite(angleRadians)) {
+            return false;
+        }
+        double length = translation.length();
+        return length > IDLE_ANCHOR && length <= AntiClipStep.MAX_RIDE_STEP && Math.abs(angleRadians) < 1.0e-9;
+    }
+
+    /**
+     * The body velocity, in blocks per second, that keeps a held ship on a sliding deck for
+     * the next physics step: this tick's deck step times 20. Null when the deck is not sliding.
+     */
+    public static Vec3 rideVelocity(Vec3 translation, double angleRadians) {
+        return sliding(translation, angleRadians) ? translation.mul(20.0) : null;
+    }
+
     public static boolean teleport(double driftSquared, double angleSincePlaceRadians) {
         return driftSquared > DRIFT * DRIFT || Math.abs(angleSincePlaceRadians) > ANGLE_DRIFT;
     }

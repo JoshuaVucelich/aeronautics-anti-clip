@@ -116,4 +116,23 @@ class CarryGateTest {
         assertEquals(0, CarryGate.nextMisses(3, CarryGate.Contact.RESTING));
         assertEquals(3, CarryGate.nextStreak(3, CarryGate.Contact.INCONCLUSIVE));
     }
+
+    @Test
+    void aSlidingDeckGivesTheShipExactlyTheDeckSpeed() {
+        Vec3 up = new Vec3(0.0, 0.4, 0.0);
+        org.junit.jupiter.api.Assertions.assertTrue(CarryGate.sliding(up, 0.0));
+        Vec3 v = CarryGate.rideVelocity(up, 0.0);
+        org.junit.jupiter.api.Assertions.assertEquals(8.0, v.y(), 1.0e-9);
+        org.junit.jupiter.api.Assertions.assertEquals(-1.25, CarryGate.rideVelocity(new Vec3(0.0, -0.0625, 0.0), 0.0).y(), 1.0e-9);
+    }
+
+    @Test
+    void aParkedTurningOrBadDeckIsNotSliding() {
+        org.junit.jupiter.api.Assertions.assertNull(CarryGate.rideVelocity(Vec3.ZERO, 0.0));
+        org.junit.jupiter.api.Assertions.assertNull(CarryGate.rideVelocity(new Vec3(0.0, 0.0005, 0.0), 0.0));
+        org.junit.jupiter.api.Assertions.assertNull(CarryGate.rideVelocity(new Vec3(0.1, 0.0, 0.0), Math.toRadians(1.0)));
+        org.junit.jupiter.api.Assertions.assertNull(CarryGate.rideVelocity(new Vec3(0.0, 2.0, 0.0), 0.0));
+        org.junit.jupiter.api.Assertions.assertNull(CarryGate.rideVelocity(new Vec3(Double.NaN, 0.0, 0.0), 0.0));
+        org.junit.jupiter.api.Assertions.assertNull(CarryGate.rideVelocity(null, 0.0));
+    }
 }

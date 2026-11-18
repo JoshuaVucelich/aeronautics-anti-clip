@@ -38,26 +38,41 @@ import java.util.List;
 public final class WheelTrial {
     private static final boolean ENABLED = Boolean.getBoolean("sable_safe_landing.wheels");
 
-    private record Case(String name, boolean deck, boolean wheelContact, int ride, int drive, int startX, int turn) {
+    private record Case(String name, boolean deck, boolean wheelContact, int ride, int drive, int startX, int turn,
+                        boolean heavy, int rpm) {
     }
 
     private static final Case[] CASES = {
-            new Case("ground-on", false, true, 0, 0, 0, 0),
-            new Case("deck-on", true, true, 0, 0, 0, 0),
-            new Case("deck-off", true, false, 0, 0, 0, 0),
-            new Case("ride-down-on", true, true, -1, 0, 0, 0),
-            new Case("ride-up-on", true, true, 1, 0, 0, 0),
-            new Case("drive-off-deck-on", true, true, 0, 8, 0, 0),
-            new Case("drive-off-deck-off", true, false, 0, 8, 0, 0),
-            new Case("drive-onto-deck-on", true, true, 0, 8, -9, 0),
-            new Case("drive-onto-deck-off", true, false, 0, 8, -9, 0),
-            new Case("turntable-on", true, true, 0, 0, 0, 4),
-            new Case("turntable-off", true, false, 0, 0, 0, 4),
-            new Case("drive-while-moving-on", true, true, -1, 8, 0, 0),
-            new Case("drive-while-moving-off", true, false, -1, 8, 0, 0),
-            new Case("turntable-offcenter-on", true, true, 0, 0, 2, 4),
-            new Case("turntable-offcenter-off", true, false, 0, 0, 2, 4)
+            new Case("ground-on", false, true, 0, 0, 0, 0, false, 32),
+            new Case("deck-on", true, true, 0, 0, 0, 0, false, 32),
+            new Case("deck-off", true, false, 0, 0, 0, 0, false, 32),
+            new Case("ride-down-on", true, true, -1, 0, 0, 0, false, 32),
+            new Case("ride-up-on", true, true, 1, 0, 0, 0, false, 32),
+            new Case("drive-off-deck-on", true, true, 0, 8, 0, 0, false, 32),
+            new Case("drive-off-deck-off", true, false, 0, 8, 0, 0, false, 32),
+            new Case("drive-onto-deck-on", true, true, 0, 8, -9, 0, false, 32),
+            new Case("drive-onto-deck-off", true, false, 0, 8, -9, 0, false, 32),
+            new Case("turntable-on", true, true, 0, 0, 0, 4, false, 32),
+            new Case("turntable-off", true, false, 0, 0, 0, 4, false, 32),
+            new Case("drive-while-moving-on", true, true, -1, 8, 0, 0, false, 32),
+            new Case("drive-while-moving-off", true, false, -1, 8, 0, 0, false, 32),
+            new Case("turntable-offcenter-on", true, true, 0, 0, 2, 4, false, 32),
+            new Case("turntable-offcenter-off", true, false, 0, 0, 2, 4, false, 32),
+            // A big, heavy machine on large tires, riding an 11x11 elevator 8 blocks at several pulley speeds.
+            new Case("heavy-up-32", true, true, 2, 0, 0, 0, true, 32),
+            new Case("heavy-down-32", true, true, -2, 0, 0, 0, true, 32),
+            new Case("heavy-up-128", true, true, 2, 0, 0, 0, true, 128),
+            new Case("heavy-down-128", true, true, -2, 0, 0, 0, true, 128),
+            new Case("heavy-up-256", true, true, 2, 0, 0, 0, true, 256),
+            new Case("heavy-down-256", true, true, -2, 0, 0, 0, true, 256),
+            new Case("heavy-up-256-off", true, false, 2, 0, 0, 0, true, 256)
     };
+    private static final boolean HEAVY_ONLY = Boolean.getBoolean("sable_safe_landing.heavyOnly");
+    private static final Case[] RUN = HEAVY_ONLY
+            ? java.util.Arrays.stream(CASES).filter(Case::heavy).toArray(Case[]::new)
+            : CASES;
+    private static final int HEAVY_DECK = 5;
+    private static final int HEAVY_RIDE = 200;
 
     private static final int SPACING = 40;
     private static final int DECK = 3;
@@ -77,6 +92,13 @@ public final class WheelTrial {
     private static double startYaw;
     private static double startDeck;
     private static boolean done;
+    private static double settledGap;
+    private static double rideMinGap;
+    private static double rideMaxGap;
+    private static double rideMaxLag;
+    private static int rideHeldTicks;
+    private static double rideDeckStart;
+    private static double rideShipStart;
 
     private WheelTrial() {
     }
@@ -101,7 +123,7 @@ public final class WheelTrial {
                 SafeLandingConfig.ENABLED.set(true);
                 SafeLandingConfig.FEED_COLLIDERS.set(true);
                 SafeLandingConfig.CARRY.set(true);
-                int lastChunk = (24 + CASES.length * SPACING + 16) >> 4;
+                int lastChunk = (24 + RUN.length * SPACING + 16) >> 4;
                 for (int cx = -1; cx <= lastChunk; cx++) {
                     for (int cz = -1; cz <= 2; cz++) {
                         level.setChunkForced(cx, cz, true);
@@ -116,12 +138,12 @@ public final class WheelTrial {
                 tick++;
                 return;
             }
-            if (index >= CASES.length) {
+            if (index >= RUN.length) {
                 log("done deckHits={}", WheelContactRuntime.deckHits());
                 finish(server);
                 return;
             }
-            step(level, CASES[index]);
+            step(level, RUN[index]);
         } catch (RuntimeException ex) {
             SableSafeLanding.LOGGER.error("WHEELS trial failed", ex);
             finish(server);
@@ -151,7 +173,9 @@ public final class WheelTrial {
                 next(level, base);
                 return;
             }
-            ship = assembleWheelCar(level, base.offset(c.startX, 3, 0), c.drive);
+            ship = c.heavy
+                    ? assembleHeavy(level, base.offset(c.startX, 4, 0))
+                    : assembleWheelCar(level, base.offset(c.startX, 3, 0), c.drive);
             hitsAtStart = WheelContactRuntime.deckHits();
             startX = ship == null ? Double.NaN : ship.logicalPose().position().x();
             startYaw = ship == null ? Double.NaN : LiveTrial.yawDegrees(ship);
@@ -210,14 +234,28 @@ public final class WheelTrial {
             if (c.drive == 0 && c.turn == 0 && t == SETTLE) {
                 log("{} RESULT wheelContact={} settledGap={} hits={} {}", c.name, c.wheelContact, LiveTrial.fmt(gap),
                         WheelContactRuntime.deckHits() - hitsAtStart, physics(level));
+                settledGap = gap;
+                rideMinGap = Double.POSITIVE_INFINITY;
+                rideMaxGap = Double.NEGATIVE_INFINITY;
+                rideMaxLag = 0.0;
+                rideHeldTicks = 0;
+                rideDeckStart = contraption == null ? Double.NaN : contraption.getAnchorVec().y;
+                rideShipStart = ship.isRemoved() ? Double.NaN : ship.logicalPose().position().y();
                 if (c.ride == 0) {
                     next(level, base);
                     return;
                 }
                 callElevator(c);
             }
-            if (c.ride != 0 && t == SETTLE + RIDE) {
-                log("{} RESULT after ride gap={} hits={} anchorY={} {}", c.name, LiveTrial.fmt(gap),
+            if (c.ride != 0 && t > SETTLE && contraption != null) {
+                trackRide(level, c, t, gap);
+            }
+            if (c.ride != 0 && t == SETTLE + rideTicks(c)) {
+                double deckMoved = contraption == null ? Double.NaN : contraption.getAnchorVec().y - rideDeckStart;
+                double shipMoved = ship.isRemoved() ? Double.NaN : ship.logicalPose().position().y() - rideShipStart;
+                log("{} RESULT after ride rpm={} gap={} settledGap={} minGap={} maxGap={} maxLag={} deckMoved={} shipMoved={} heldTicks={} hits={} anchorY={} {}",
+                        c.name, c.rpm, LiveTrial.fmt(gap), LiveTrial.fmt(settledGap), LiveTrial.fmt(rideMinGap), LiveTrial.fmt(rideMaxGap),
+                        LiveTrial.fmt(rideMaxLag), LiveTrial.fmt(deckMoved), LiveTrial.fmt(shipMoved), rideHeldTicks,
                         WheelContactRuntime.deckHits() - hitsAtStart,
                         contraption == null ? "none" : LiveTrial.fmt(contraption.getAnchorVec().y), describe(ship));
                 next(level, base);
@@ -248,11 +286,14 @@ public final class WheelTrial {
             controller = level.getBlockEntity(base);
             return;
         }
+        int half = deckHalf(c);
+        int roadZ = Math.max(5, half + 1);
+        int dig = c.heavy ? -10 : -6;
         for (int x = -14; x <= 14; x++) {
-            for (int z = -5; z <= 5; z++) {
-                boolean deckSpot = Math.abs(x) <= DECK && Math.abs(z) <= DECK;
+            for (int z = -roadZ; z <= roadZ; z++) {
+                boolean deckSpot = Math.abs(x) <= half && Math.abs(z) <= half;
                 if (deckSpot && c.deck) {
-                    for (int y = -6; y <= 0; y++) {
+                    for (int y = dig; y <= 0; y++) {
                         BlockPos dug = base.offset(x, y, z);
                         if (dug.getY() > level.getMinBuildHeight()) {
                             level.setBlockAndUpdate(dug, Blocks.AIR.defaultBlockState());
@@ -266,9 +307,9 @@ public final class WheelTrial {
         if (!c.deck) {
             return;
         }
-        controller = LiveTrial.elevator(level, base);
-        for (int x = -DECK; x <= DECK; x++) {
-            for (int z = -DECK; z <= DECK; z++) {
+        controller = c.heavy ? elevatorAt(level, base, c.rpm) : LiveTrial.elevator(level, base);
+        for (int x = -half; x <= half; x++) {
+            for (int z = -half; z <= half; z++) {
                 if (x == 0 && z == 0) {
                     continue;
                 }
@@ -277,8 +318,8 @@ public final class WheelTrial {
         }
         LiveTrial.place(level, base.offset(0, 1, 0), "create:redstone_contact", Direction.SOUTH);
         // Glue the deck together the way a player would, so the whole deck moves.
-        BlockPos lo = base.offset(-DECK, 1, -DECK);
-        int size = DECK * 2 + 1;
+        BlockPos lo = base.offset(-half, 1, -half);
+        int size = half * 2 + 1;
         level.addFreshEntity(new com.simibubi.create.content.contraptions.glue.SuperGlueEntity(level,
                 new net.minecraft.world.phys.AABB(lo.getX(), lo.getY(), lo.getZ(), lo.getX() + size, lo.getY() + 1, lo.getZ() + size)));
     }
@@ -324,6 +365,78 @@ public final class WheelTrial {
         }
         column.target(target);
         log("{} elevator target {} -> {}", c.name, current, target);
+    }
+
+    private static int rideTicks(Case c) {
+        return c.heavy ? HEAVY_RIDE : RIDE;
+    }
+
+    private static int deckHalf(Case c) {
+        return c.heavy ? HEAVY_DECK : DECK;
+    }
+
+    /** Per-tick ride samples: the gap to the deck and how far the ship trails the deck's travel. */
+    private static void trackRide(ServerLevel level, Case c, int t, double gap) {
+        if (ship.isRemoved() || !Double.isFinite(gap)) {
+            return;
+        }
+        rideMinGap = Math.min(rideMinGap, gap);
+        rideMaxGap = Math.max(rideMaxGap, gap);
+        double lag = Math.abs(gap - settledGap);
+        rideMaxLag = Math.max(rideMaxLag, lag);
+        boolean held = LiveTrial.held(ship);
+        if (held) {
+            rideHeldTicks++;
+        }
+        if (t % 5 == 0) {
+            log("{} ride t={} gap={} deckY={} shipY={} held={} {}", c.name, t, LiveTrial.fmt(gap),
+                    LiveTrial.fmt(contraption.getAnchorVec().y), LiveTrial.fmt(ship.logicalPose().position().y()), held, physics(level));
+        }
+    }
+
+    /**
+     * A big, heavy machine: a 5x7 plank floor with three layers of iron blocks on top (about
+     * 135 blocks), and four wheel mounts with large tires at the corners (z -3 facing north,
+     * z +3 facing south), so the wheels sit at z -4 and z +4.
+     */
+    private static ServerSubLevel assembleHeavy(ServerLevel level, BlockPos center) {
+        List<BlockPos> blocks = new ArrayList<>();
+        Item tire = BuiltInRegistries.ITEM.get(ResourceLocation.parse("offroad:large_tire"));
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -3; z <= 3; z++) {
+                BlockPos pos = center.offset(x, 0, z);
+                boolean corner = Math.abs(x) == 2 && Math.abs(z) == 3;
+                if (corner) {
+                    LiveTrial.place(level, pos, "offroad:wheel_mount", z < 0 ? Direction.NORTH : Direction.SOUTH);
+                    BlockEntity mount = level.getBlockEntity(pos);
+                    if (mount != null && tire != null && tire != Items.AIR) {
+                        CompoundTag tag = mount.saveWithoutMetadata(level.registryAccess());
+                        tag.put("CurrentStack", new ItemStack(tire).save(level.registryAccess()));
+                        mount.loadWithComponents(tag, level.registryAccess());
+                        mount.setChanged();
+                    }
+                } else {
+                    level.setBlockAndUpdate(pos, Blocks.OAK_PLANKS.defaultBlockState());
+                }
+                blocks.add(pos.immutable());
+                for (int y = 1; y <= 3; y++) {
+                    BlockPos up = pos.above(y);
+                    level.setBlockAndUpdate(up, Blocks.IRON_BLOCK.defaultBlockState());
+                    blocks.add(up.immutable());
+                }
+            }
+        }
+        BoundingBox3i bounds = new BoundingBox3i(center.getX() - 2, center.getY(), center.getZ() - 3,
+                center.getX() + 2, center.getY() + 3, center.getZ() + 3);
+        return SubLevelAssemblyHelper.assembleBlocks(level, center, blocks, bounds);
+    }
+
+    /** Same pulley layout as the live trial, with the pulley motor at {@code rpm}. */
+    private static BlockEntity elevatorAt(ServerLevel level, BlockPos base, int rpm) {
+        BlockPos pulleyPos = base.offset(0, 20, 0);
+        LiveTrial.place(level, pulleyPos, "create:elevator_pulley", Direction.NORTH);
+        LiveTrial.motor(level, pulleyPos.west(), Direction.EAST, rpm);
+        return level.getBlockEntity(pulleyPos);
     }
 
     /**
@@ -437,7 +550,7 @@ public final class WheelTrial {
         }
         contraption = null;
         controller = null;
-        for (int y = 1; y <= 14; y++) {
+        for (int y = 1; y <= 24; y++) {
             for (int x = -16; x <= 16; x++) {
                 for (int z = -6; z <= 6; z++) {
                     level.setBlockAndUpdate(base.offset(x, y, z), Blocks.AIR.defaultBlockState());
