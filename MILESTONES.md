@@ -93,3 +93,11 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - `wheelContact` is documented as not synced: the server's value decides driving and carry, the client's only changes where wheels are drawn.
 - Live trial adds driving while the elevator moves and an off-center turntable.
 - Version `0.7.0-rc.5` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.6
+
+- A heavy wheeled ship on a moving elevator now moves at the deck's speed. While the deck is sliding, carry places the ship on its deck offset every tick and sets the Rapier body velocity to the deck velocity, during the capture confirm too. Before, only the pose-delta field was written, so the body trailed the deck, sank onto it, and a rebound looked like a takeoff and released the lock.
+- When the deck stops, the ship is placed once more and the ride velocity is cleared, so it does not coast past the top.
+- Bearings are unchanged: a turning deck is not sliding.
+- Wheel trial adds a heavy ship (about 140 blocks, large tires, 11x11 deck) riding up and down at 32, 128, and 256 rpm, plus 256 rpm with `wheelContact` off.
+- Version `0.7.0-rc.6` jar. Still not published to Modrinth or CurseForge.
