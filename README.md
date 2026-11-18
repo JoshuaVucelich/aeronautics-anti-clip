@@ -25,23 +25,27 @@ The sim module does not start Minecraft or link Rapier.
 ./gradlew build
 ```
 
-The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.7.0-rc.4`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
+The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.7.0-rc.5`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
 
 `/anticlip status` prints the master switch, the feature flags, the carry locks, and whether the Sable removal hook has run. `/anticlip off` and `/anticlip on` (permission level 2) flip `enabled` and save it. Off disables rescue, the collider feed, carry, and sweep. Failure cases and the guards for them are in `docs/FAILURE_SCENARIOS.md`.
 
 A dedicated server started with `-Dsable_safe_landing.live=true` runs a scripted trial: a sub-level below min build height, a sub-level at Sable's remove bound, and a vehicle on an elevator, a bearing, and a piston. It logs lines prefixed with `LIVE` and then stops.
 
-A dedicated server started with `-Dsable_safe_landing.wheels=true` runs the wheel trial: a four-wheel car (Offroad wheel mounts and tires) on the ground, parked on an elevator deck, riding the elevator up and down, driving off the deck, driving onto it, and parked on a turning bearing deck. Each case runs with `wheelContact` on and off. It logs lines prefixed with `WHEELS` and then stops.
+A dedicated server started with `-Dsable_safe_landing.wheels=true` runs the wheel trial: a four-wheel car (Offroad wheel mounts and tires) on the ground, parked on an elevator deck, riding the elevator up and down, driving off the deck, driving onto it, driving while the elevator moves, and parked on a turning bearing deck at its center and off-center. Each case runs with `wheelContact` on and off. It logs lines prefixed with `WHEELS` and then stops.
 
 ## Wheels on a contraption deck
 
 Offroad's wheel mount (bundled with Create Aeronautics 1.3.x) finds the ground with three `Level.clip` rays from each wheel. Sable's clip sees world blocks and sub-levels. A Create elevator, bearing, piston, or gantry deck is a contraption entity, and its blocks are not in the world, so the rays pass through it. The collider feed holds the body up, but the wheels get no spring and no drive force. They hang at full extension through the deck and the car cannot drive on or off.
 
-With `wheelContact` on (the default), the same ray is also cast through the blocks of nearby contraptions. When a deck is strictly closer than what Sable found, the wheel gets that hit, in world space, with the face turned by the deck rotation. Friction is the default 1. Only contraptions whose box meets the ray are tested, and the list of live contraptions is kept from entity join and leave events, so a level with no contraptions does no extra work. A failure keeps the original ray. The mixin is optional, so without Offroad it does nothing. The rays run on the server (suspension and drive) and on the client (where the wheels are drawn), so the jar belongs on both.
+With `wheelContact` on (the default), the same ray is also cast through the blocks of nearby contraptions. When a deck is strictly closer than what Sable found, the wheel gets that hit, in world space, with the face turned by the deck rotation. Friction is the default 1. A failure keeps the original ray. The mixin is optional, so without Offroad it does nothing. The rays run on the server (suspension and drive) and on the client (where the wheels are drawn), so the jar belongs on both.
 
-Wheels on a deck also count as resting contact for carry. A car on its suspension rides about a block above the deck, which is past the hull gap carry uses, and the wheel force does not move the car with a turning deck. A bearing deck now captures a car parked on its wheels and turns it.
+Cost: a level with no contraption pays one map read per wheel ray. With contraptions loaded, their bounds are cached once per level per tick (at most 256). Each ship is checked once per tick against that cache, using its box padded by 7.5 blocks, the farthest its wheel rays can reach. A ray from a ship with no contraption that close does two map reads and returns. The wheel mount's ship is cached, so a ray does no Sable lookup. Only rays from a ship near a contraption test that contraption's blocks.
 
-`/anticlip status` prints `wheelContact` and `wheelDeckHits`, the number of wheel rays that landed on a deck since startup.
+Wheels on a deck also count as resting contact for carry. A car on its suspension rides about a block above the deck, which is past the hull gap carry uses, and the wheel force does not move the car with a turning deck. Only a hit Offroad would stand on counts: within the suspension reach (0.65 rest + tire radius + 0.25 from the wheel center) and on a face pointing up in the car's frame. A ship hovering higher than that is not grabbed, and takeoff release works once the wheels leave that reach. A touch expires after 2 ticks and expired touches are pruned every tick. A bearing deck captures a car parked on its wheels and turns it.
+
+`wheelContact` is a common config value and is not synced. The server's value decides driving and carry. A client reads its own file, which only changes where its wheels are drawn.
+
+`/anticlip status` prints `wheelContact`, `wheelDeckHits` (server wheel rays that stood on a deck since startup, so client rays and hits past the suspension reach are not counted), and `wheelTouches` (ships whose wheels touch a deck right now).
 
 ## Carry
 

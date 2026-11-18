@@ -83,3 +83,13 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - `/anticlip status` prints `wheelContact` and `wheelDeckHits`.
 - Repro: `WheelContactTest` (ray bounds, nearby check, closer hit wins). Live trial: `-Dsable_safe_landing.wheels=true`.
 - Version `0.7.0-rc.4` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.5
+
+- A wheel touch counts as carry contact only within the suspension reach (rest + tire radius + 0.25) and on an up-facing face, as Offroad itself decides. A wheeled ship hovering above a moving deck is no longer grabbed, and takeoff release is not delayed.
+- Contraption bounds are cached once per level per tick (capped at 256), and each ship is checked once per tick. A wheel ray from a ship far from every contraption does two map reads. The mount's ship is cached, so no Sable lookup runs per ray.
+- Expired wheel touches and idle ship entries are pruned every tick and on level unload.
+- `wheelDeckHits` counts only accepted server hits. `/anticlip status` adds `wheelTouches`.
+- `wheelContact` is documented as not synced: the server's value decides driving and carry, the client's only changes where wheels are drawn.
+- Live trial adds driving while the elevator moves and an off-center turntable.
+- Version `0.7.0-rc.5` jar. Still not published to Modrinth or CurseForge.
