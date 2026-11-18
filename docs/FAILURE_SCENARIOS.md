@@ -1,6 +1,6 @@
 # Failure scenarios
 
-Aeronautics vehicles are Sable sub-levels. The loss that started this mod is a car that fell through a moving Create elevator, then through bedrock. A second loss is an airship deleted after its grabbers froze. This note walks through how those happen and what `0.7.0-rc.6` does about each one.
+Aeronautics vehicles are Sable sub-levels. The loss that started this mod is a car that fell through a moving Create elevator, then through bedrock. A second loss is an airship deleted after its grabbers froze. This note walks through how those happen and what `0.7.0-rc.7` does about each one.
 
 The master switch is the config key `enabled` (default true). `/anticlip off` and `/anticlip on` flip it and save the file. `/anticlip status` prints the switch, the feature flags, how many carry locks are held, and whether the Sable removal hook has run. Off means no rescue, no collider feed, no carry, and no sweep. Disarm clears `sable$initialized` on every claim in the level, including a contraption that was displaced before its collider was uploaded. Turning the feed off in the config does the same restore. Sable's next tick adds its own kinematic collider again. Mixin injects use `require = 0`, the mixin config is not required, and each inject is wrapped so a missing target or a thrown callback logs and returns. Those warnings are limited to one every five seconds. The server tick is not crashed by a Sable or Create mismatch.
 
@@ -13,6 +13,10 @@ A kinematic deck pushes a dynamic body up and does not pull it down. Carry is th
 - A stall (anchor and angle idle) still releases after 10 ticks, so a stopped elevator does not glue the car. Motion, including a reverse, clears that streak. The stored offset is applied at the deck's current pose, so a reverse that stays inside the step cap follows. It does not keep the old direction.
 - Contact is a bottom face on a block top. A side hit from a drill, harvester, saw, or train does not capture. Trains, drills, harvesters, and ploughs are not contraption kinds this mod feeds or carries. A car standing on a gantry platform still is.
 - Two cars on one deck are two locks. New captures examine at most 32 ships a tick, rotating through the list, and stop once 32 locks are held. Ships already locked are still maintained.
+
+## Heavy machine flung off a moving elevator (rc.5 server log)
+
+On the real server (rc.5, carry on, elevator stepping 0.025 blocks a tick), the ship was captured, held for about 12 seconds, then moved 5.8 blocks in one tick at 113 blocks per second. That is `deck calm speed=112.947` (the speed was over the 80 blocks per second limit, so it was zeroed) and `reason=spike d=5.792`. The log does not say what flung it. The likely cause is a ship that trailed the rising deck, sank into it, and was pushed out by the solver. rc.6 removes that trailing: a held ship gets the deck's velocity every tick. The ship then skidded across the deck. Each touch started a new confirm, and the offset was stored at the first touch, so five ticks later the ship was 15.5 and then 8.9 blocks from that spot and was released as `separated`. rc.7 stores the horizontal offset when the confirm finishes (bearings keep the first touch) and, on a sliding deck, does not confirm a ship that is moving more than 2 blocks per second across it. The wheel trial case `heavy-fling-16` scripts the same fling and skid: rc.6 logs spike, then separated, then another spike; rc.7 logs spike, one skid line, and a single capture once the ship stops, and the ship rides to the top on the deck.
 
 ## Wheels through an elevator deck
 

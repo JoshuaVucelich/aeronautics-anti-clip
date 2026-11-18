@@ -101,3 +101,10 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - Bearings are unchanged: a turning deck is not sliding.
 - Wheel trial adds a heavy ship (about 140 blocks, large tires, 11x11 deck) riding up and down at 32, 128, and 256 rpm, plus 256 rpm with `wheelContact` off.
 - Version `0.7.0-rc.6` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.7
+
+- The horizontal deck-frame offset is stored when the capture confirm finishes, not at the first touch. The height stays the first touch's resting height, and a bearing keeps the whole first-touch offset. A ship that moved over the deck during the confirm was pulled back to the first touch, or released as `separated` when that was more than 8 blocks away. That is the release the real server logged after the fling.
+- On a sliding deck, a ship moving more than 2 blocks per second across it, relative to the deck, restarts the confirm and logs `LIVE deck skid` once. A flung or pushed ship is captured only after it has stopped on the deck. Turntables are not checked.
+- Wheel trial adds `heavy-up-16` and `heavy-down-16` (the real server's elevator speed) and `heavy-fling-16`, which scripts the real fling (113 blocks per second) and skid (50 blocks per second for 6 ticks) on a 27x27 deck. `-Dsable_safe_landing.cases=a,b` runs only the named cases.
+- Version `0.7.0-rc.7` jar. Still not published to Modrinth or CurseForge.
