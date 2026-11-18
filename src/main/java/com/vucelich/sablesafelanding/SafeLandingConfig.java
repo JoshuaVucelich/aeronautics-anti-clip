@@ -6,7 +6,7 @@ import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.7.0-rc.4";
+    public static final String VERSION = "0.7.0-rc.5";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -70,7 +70,7 @@ public final class SafeLandingConfig {
                 .comment("Consecutive ticks the sub-level must stay below that line before it is restored.")
                 .defineInRange("bedrockTicks", defaults.bedrockTicks(), 1, 20_000);
         WHEEL_CONTACT = builder
-                .comment("On by default. Lets Aeronautics wheel mounts find the ground on a moving elevator, bearing, piston, or gantry deck, so a car can drive on and off. Off leaves the wheel ground ray exactly as Offroad casts it. Needed on the server for driving and on the client for where the wheels are drawn. Costs nothing in a level with no contraption.")
+                .comment("On by default. Lets Aeronautics wheel mounts find the ground on a moving elevator, bearing, piston, or gantry deck, so a car can drive on and off. Off leaves the wheel ground ray exactly as Offroad casts it. Needed on the server for driving and on the client for where the wheels are drawn. Not synced: the server value decides driving and carry, the client value only changes where its wheels are drawn. A ship far from every contraption costs two map reads per wheel ray.")
                 .define("wheelContact", true);
         CONFIG_VERSION = builder
                 .comment("Internal. 0 means this file was written before carry defaulted on. Loading migrates that file to carry=true and stores 1. A later edit that turns carry off is kept.")

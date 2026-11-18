@@ -52,7 +52,11 @@ public final class WheelTrial {
             new Case("drive-onto-deck-on", true, true, 0, 8, -9, 0),
             new Case("drive-onto-deck-off", true, false, 0, 8, -9, 0),
             new Case("turntable-on", true, true, 0, 0, 0, 4),
-            new Case("turntable-off", true, false, 0, 0, 0, 4)
+            new Case("turntable-off", true, false, 0, 0, 0, 4),
+            new Case("drive-while-moving-on", true, true, -1, 8, 0, 0),
+            new Case("drive-while-moving-off", true, false, -1, 8, 0, 0),
+            new Case("turntable-offcenter-on", true, true, 0, 0, 2, 4),
+            new Case("turntable-offcenter-off", true, false, 0, 0, 2, 4)
     };
 
     private static final int SPACING = 40;
@@ -171,15 +175,24 @@ public final class WheelTrial {
                 log("{} t={} relX={} gap={} hits={} {} {}", c.name, t, LiveTrial.fmt(relX), LiveTrial.fmt(gap),
                         WheelContactRuntime.deckHits() - hitsAtStart, describe(ship), physics(level));
             }
+            if (c.drive != 0 && c.ride != 0 && t == 1) {
+                // The motors are already turning. Start the elevator under the moving car.
+                callElevator(c);
+            }
+            if (c.drive != 0 && c.ride != 0 && t % 10 == 0) {
+                log("{} t={} held={} anchorY={}", c.name, t, LiveTrial.held(ship),
+                        contraption == null ? "none" : LiveTrial.fmt(contraption.getAnchorVec().y));
+            }
             if (c.drive != 0 && ship.isRemoved()) {
                 log("{} RESULT wheelContact={} ship removed at t={}", c.name, c.wheelContact, t);
                 next(level, base);
                 return;
             }
             if (c.drive != 0 && t == DRIVE) {
-                log("{} RESULT wheelContact={} movedX={} endRelX={} endGap={} minGapOverDeck={} hits={}", c.name, c.wheelContact,
+                log("{} RESULT wheelContact={} movedX={} endRelX={} endGap={} minGapOverDeck={} hits={} held={} anchorY={} {}", c.name, c.wheelContact,
                         LiveTrial.fmt(ship.logicalPose().position().x() - startX), LiveTrial.fmt(relX), LiveTrial.fmt(gap),
-                        LiveTrial.fmt(minGapOnDeck), WheelContactRuntime.deckHits() - hitsAtStart);
+                        LiveTrial.fmt(minGapOnDeck), WheelContactRuntime.deckHits() - hitsAtStart, LiveTrial.held(ship),
+                        contraption == null ? "none" : LiveTrial.fmt(contraption.getAnchorVec().y), describe(ship));
                 next(level, base);
                 return;
             }
