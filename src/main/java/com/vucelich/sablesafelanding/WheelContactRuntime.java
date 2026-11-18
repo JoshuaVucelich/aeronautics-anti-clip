@@ -58,7 +58,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Cost: once per level per tick the contraption bounds are cached (at most
  * {@link ColliderFeedRuntime#MAX_CONTRAPTIONS}). Once per ship per tick that list is cut to the
  * contraptions that can reach the ship's wheel rays. A ray from a ship with none of those does
- * two map reads and returns. The wheel mount's ship is cached, so a ray does no Sable lookup.
+ * three map reads and returns. The wheel mount's ship is cached, so a ray does no Sable lookup.
  */
 public final class WheelContactRuntime {
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
