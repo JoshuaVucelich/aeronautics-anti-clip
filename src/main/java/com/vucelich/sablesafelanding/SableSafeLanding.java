@@ -25,11 +25,17 @@ public final class SableSafeLanding {
         NeoForge.EVENT_BUS.addListener(CarryRuntime::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(CarryRuntime::onServerTick);
         NeoForge.EVENT_BUS.addListener(AntiClipCommand::register);
+        NeoForge.EVENT_BUS.addListener(LiveContraptions::onJoin);
+        NeoForge.EVENT_BUS.addListener(LiveContraptions::onLeave);
+        NeoForge.EVENT_BUS.addListener(LiveContraptions::onUnload);
         NeoForge.EVENT_BUS.addListener(SableSafeLanding::onChunkUnload);
         NeoForge.EVENT_BUS.addListener(SableSafeLanding::onUnload);
         NeoForge.EVENT_BUS.addListener(SableSafeLanding::onStop);
         if (LiveTrial.enabled()) {
             NeoForge.EVENT_BUS.addListener(LiveTrial::onTick);
+        }
+        if (WheelTrial.enabled()) {
+            NeoForge.EVENT_BUS.addListener(WheelTrial::onTick);
         }
         LOGGER.info("Aeronautics Anti-Clip {} loaded", SafeLandingConfig.VERSION);
     }

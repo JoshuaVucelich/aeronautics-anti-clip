@@ -260,6 +260,7 @@ public final class CarryRuntime {
         SUPPORT_CACHE.clear();
         BLOCK_CACHE.clear();
         PLACEMENT_LOGGED.clear();
+        WheelContactRuntime.clear();
         captureCursor = 0;
     }
 
@@ -391,16 +392,22 @@ public final class CarryRuntime {
                 continue;
             }
             Aabb query = hull.expand(CarryBroadphase.INFLATE);
+            // Wheels on a deck count as resting contact. The hull rides above it on the suspension,
+            // so it can be farther from the deck than the broadphase and the block test allow.
+            String wheelDeck = WheelContactRuntime.wheelSupport(ship.getUniqueId(), level.getGameTime());
             for (DeckBox deck : decks) {
-                if (!query.intersects(deck.bounds)) {
+                boolean onWheels = wheelDeck != null && wheelDeck.equals(deck.entity.getUUID().toString());
+                if (!onWheels && !query.intersects(deck.bounds)) {
                     continue;
                 }
                 // Block test is only this contraption. A ship that missed every box never gets here.
-                BlockContact.Touch touch = BlockContact.touch(
-                        ship,
-                        blocksCached(level, dimension, deck.entity),
-                        CarryGate.CAPTURE_GAP
-                );
+                BlockContact.Touch touch = onWheels
+                        ? new BlockContact.Touch(CarryGate.Contact.RESTING, wheelDeck)
+                        : BlockContact.touch(
+                                ship,
+                                blocksCached(level, dimension, deck.entity),
+                                CarryGate.CAPTURE_GAP
+                        );
                 if (touch.contact() != CarryGate.Contact.RESTING || touch.supportId() == null) {
                     continue;
                 }
@@ -464,7 +471,7 @@ public final class CarryRuntime {
             );
             return false;
         }
-        CarryGate.Contact contact = maintain(ship, supports);
+        CarryGate.Contact contact = maintain(level, ship, supports, lock.contraptionId);
         if (contact == CarryGate.Contact.NONE) {
             // One resting tick can be a graze. After a second, allow the same gap as a confirmed ride.
             if (lock.contactTicks < 2) {
@@ -522,7 +529,8 @@ public final class CarryRuntime {
         double deckUp = (anchor.y - lock.lastAnchorY) * 20.0;
         lock.lastAnchorY = anchor.y;
         double upward = bodyUpSpeed(level, ship);
-        boolean clear = clearance(ship, supports) > CarryGate.TAKEOFF_CLEARANCE;
+        boolean clear = !onWheels(level, ship, lock.contraptionId)
+                && clearance(ship, supports) > CarryGate.TAKEOFF_CLEARANCE;
         lock.takeoffTicks = CarryGate.nextTakeoff(lock.takeoffTicks, upward, deckUp, clear);
     }
 
@@ -595,7 +603,7 @@ public final class CarryRuntime {
         lock.lastAnchorY = anchor.y;
         lock.lastAnchorZ = anchor.z;
         lock.lastAngle = angle;
-        CarryGate.Contact contact = maintain(ship, supports);
+        CarryGate.Contact contact = maintain(level, ship, supports, lock.contraptionId);
         lock.missTicks = CarryGate.nextMisses(lock.missTicks, contact);
         return CarryGate.release(false, false, lock.takeoffTicks, lock.idleTicks, lock.missTicks);
     }
@@ -738,11 +746,26 @@ public final class CarryRuntime {
         return true;
     }
 
+    /** True when this ship's wheel rays landed on this contraption in the last couple of ticks. */
+    private static boolean onWheels(ServerLevel level, ServerSubLevel ship, String contraptionId) {
+        return contraptionId != null
+                && contraptionId.equals(WheelContactRuntime.wheelSupport(ship.getUniqueId(), level.getGameTime()));
+    }
+
     /**
      * Block bottoms decide a new contact. Once the hull is already on the deck, its box keeps
      * the lock through a yaw: the bottoms move around the pose while the box still sits on the planks.
      */
-    private static CarryGate.Contact maintain(ServerSubLevel ship, List<SupportMotion> supports) {
+    private static CarryGate.Contact maintain(
+            ServerLevel level,
+            ServerSubLevel ship,
+            List<SupportMotion> supports,
+            String contraptionId
+    ) {
+        // A car standing on its wheels: the wheel rays landed on this deck, so the car is on it.
+        if (onWheels(level, ship, contraptionId)) {
+            return CarryGate.Contact.RESTING;
+        }
         if (supports.isEmpty()) {
             return CarryGate.Contact.NONE;
         }

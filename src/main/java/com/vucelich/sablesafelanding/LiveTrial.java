@@ -568,16 +568,16 @@ public final class LiveTrial {
                 contraption != null && ColliderFeedRuntime.isClaimed(contraption.getUUID().toString()));
     }
 
-    private static boolean held(ServerSubLevel subLevel) {
+    static boolean held(ServerSubLevel subLevel) {
         return subLevel != null && CarryRuntime.holding(subLevel.getUniqueId());
     }
 
-    private static double yawDegrees(ServerSubLevel subLevel) {
+    static double yawDegrees(ServerSubLevel subLevel) {
         Quaterniondc orientation = subLevel.logicalPose().orientation();
         return Math.toDegrees(new Rot(orientation.x(), orientation.y(), orientation.z(), orientation.w()).yaw());
     }
 
-    private static double deckDegrees(AbstractContraptionEntity entity) {
+    static double deckDegrees(AbstractContraptionEntity entity) {
         if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
             return controlled.getAngle(1.0f);
         }
@@ -646,7 +646,7 @@ public final class LiveTrial {
         log("{} immediate alive {} entity {}", scene.name, contraption != null && contraption.isAlive(), contraption);
     }
 
-    private static BlockEntity elevator(ServerLevel level, BlockPos base) {
+    static BlockEntity elevator(ServerLevel level, BlockPos base) {
         // The deck has to be able to drop several blocks without hitting stone.
         for (int y = -6; y <= 0; y++) {
             for (int x = -2; x <= 2; x++) {
@@ -720,11 +720,11 @@ public final class LiveTrial {
         return level.getBlockEntity(base);
     }
 
-    private static void motor(ServerLevel level, BlockPos pos, Direction facing) {
+    static void motor(ServerLevel level, BlockPos pos, Direction facing) {
         motor(level, pos, facing, 32);
     }
 
-    private static void motor(ServerLevel level, BlockPos pos, Direction facing, int speed) {
+    static void motor(ServerLevel level, BlockPos pos, Direction facing, int speed) {
         place(level, pos, "create:creative_motor", facing);
         if (level.getBlockEntity(pos) instanceof CreativeMotorBlockEntity motor && motor.generatedSpeed != null) {
             motor.generatedSpeed.setValue(speed);
@@ -846,7 +846,7 @@ public final class LiveTrial {
         subLevel.updateBoundingBox();
     }
 
-    private static AbstractContraptionEntity attached(BlockEntity controller) {
+    static AbstractContraptionEntity attached(BlockEntity controller) {
         if (controller instanceof MechanicalBearingBlockEntity bearing) {
             return bearing.getMovedContraption();
         }
@@ -856,7 +856,7 @@ public final class LiveTrial {
         return null;
     }
 
-    private static void place(ServerLevel level, BlockPos pos, String id, Direction facing) {
+    static void place(ServerLevel level, BlockPos pos, String id, Direction facing) {
         Block block = BuiltInRegistries.BLOCK.get(ResourceLocation.parse(id));
         if (block == null || block == Blocks.AIR) {
             log("missing block {}", id);
@@ -888,7 +888,7 @@ public final class LiveTrial {
         return state;
     }
 
-    private static String causeText(ReflectiveOperationException ex) {
+    static String causeText(ReflectiveOperationException ex) {
         Throwable cause = ex instanceof InvocationTargetException target && target.getCause() != null ? target.getCause() : ex;
         if (cause instanceof AssemblyException assembly && assembly.component != null) {
             return assembly.component.getString();
@@ -989,11 +989,11 @@ public final class LiveTrial {
                 + "," + fmt(subLevel.logicalPose().position().z());
     }
 
-    private static String fmt(double value) {
+    static String fmt(double value) {
         return Double.isFinite(value) ? String.format(java.util.Locale.ROOT, "%.2f", value) : "NaN";
     }
 
-    private static void invoke(BlockEntity entity, String name) throws ReflectiveOperationException {
+    static void invoke(BlockEntity entity, String name) throws ReflectiveOperationException {
         Class<?> type = entity.getClass();
         while (type != null) {
             try {
