@@ -10,6 +10,20 @@ package com.vucelich.sablesafelanding.sim;
 public final class WheelContact {
     /** Blocks added around a wheel ray before it is tested against a contraption's reach. */
     public static final double RAY_PAD = 0.5;
+    /** Offroad's suspension rest length. */
+    public static final double SUSPENSION_REST = 0.65;
+    /** Offroad treats a wheel as lifted past rest + tire radius + this margin. */
+    public static final double LIFT_MARGIN = 0.25;
+    /** Offroad's ground ray length from the wheel center. */
+    public static final double RAY_LENGTH = 5.0;
+    /**
+     * How far past a ship's box its wheel rays can reach. A wheel center sits one block outside
+     * its mount, the side rays one more block along the wheel, and a ray runs 5 blocks along the
+     * ship's down axis, which a tilted ship turns. Padding every side covers any tilt.
+     */
+    public static final double SHIP_REACH = RAY_LENGTH + 2.0 + RAY_PAD;
+    /** Offroad ignores a hit whose face is less than 60 degrees from the wheel's up. */
+    public static final double MIN_UP_DOT = 0.5;
 
     private WheelContact() {
     }
@@ -60,6 +74,37 @@ public final class WheelContact {
         }
         Aabb reach = reach(contraption);
         return reach != null && ray.intersects(reach);
+    }
+
+    /**
+     * Box around a ship that holds every one of its wheel rays this tick. A contraption whose
+     * reach misses it cannot be under any of the ship's wheels, so its rays skip the deck test.
+     */
+    public static Aabb shipReach(Aabb shipBox) {
+        if (shipBox == null || !shipBox.finite()) {
+            return null;
+        }
+        return shipBox.expand(SHIP_REACH);
+    }
+
+    /** True when the contraption's reach can meet one of the ship's wheel rays. */
+    public static boolean shipNear(Aabb shipReach, Aabb contraption) {
+        return near(shipReach, contraption);
+    }
+
+    /**
+     * True when Offroad would treat the wheel as standing on this hit: within the suspension
+     * reach (rest + tire radius + margin, measured from the wheel center) and on a face that
+     * points up in the ship's frame. Only such a hit counts as the ship resting on the deck.
+     */
+    public static boolean standing(double distance, double tireRadius, double upDot) {
+        if (!Double.isFinite(distance) || !Double.isFinite(tireRadius) || !Double.isFinite(upDot)) {
+            return false;
+        }
+        if (distance <= 1.0e-5 || tireRadius < 0.0) {
+            return false;
+        }
+        return distance <= SUSPENSION_REST + tireRadius + LIFT_MARGIN && upDot >= MIN_UP_DOT;
     }
 
     /**

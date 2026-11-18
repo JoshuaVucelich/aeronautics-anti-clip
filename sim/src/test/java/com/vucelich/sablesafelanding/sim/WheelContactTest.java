@@ -58,4 +58,33 @@ class WheelContactTest {
         assertNull(WheelContact.reach(null));
         assertFalse(WheelContact.near(null, new Aabb(0, 0, 0, 1, 1, 1)));
     }
+
+    @Test
+    void onlyAnUpFacingHitInsideTheSuspensionReachCountsAsStanding() {
+        double tire = 0.96875;
+        double reach = WheelContact.SUSPENSION_REST + tire + WheelContact.LIFT_MARGIN;
+        assertTrue(WheelContact.standing(1.48, tire, 1.0));
+        assertTrue(WheelContact.standing(reach, tire, 1.0));
+        assertFalse(WheelContact.standing(reach + 0.01, tire, 1.0));
+        assertFalse(WheelContact.standing(4.9, tire, 1.0));
+        assertFalse(WheelContact.standing(1.48, tire, 0.0));
+        assertFalse(WheelContact.standing(1.48, tire, -1.0));
+        assertTrue(WheelContact.standing(1.48, tire, 0.5));
+        assertFalse(WheelContact.standing(0.0, tire, 1.0));
+        assertFalse(WheelContact.standing(Double.NaN, tire, 1.0));
+    }
+
+    @Test
+    void aShipFarFromEveryContraptionHasNoCandidates() {
+        Aabb deck = new Aabb(0.0, 64.0, 0.0, 7.0, 65.0, 7.0);
+        Aabb overDeck = WheelContact.shipReach(new Aabb(2.0, 66.0, 1.0, 5.0, 67.0, 6.0));
+        Aabb parkedBeside = WheelContact.shipReach(new Aabb(9.0, 64.0, 1.0, 12.0, 65.0, 6.0));
+        Aabb farAway = WheelContact.shipReach(new Aabb(100.0, 64.0, 100.0, 103.0, 65.0, 105.0));
+        Aabb highAbove = WheelContact.shipReach(new Aabb(2.0, 90.0, 1.0, 5.0, 91.0, 6.0));
+        assertTrue(WheelContact.shipNear(overDeck, deck));
+        assertTrue(WheelContact.shipNear(parkedBeside, deck));
+        assertFalse(WheelContact.shipNear(farAway, deck));
+        assertFalse(WheelContact.shipNear(highAbove, deck));
+        assertNull(WheelContact.shipReach(null));
+    }
 }

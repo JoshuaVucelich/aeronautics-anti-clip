@@ -14,7 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Contraption entities loaded in each level, on the server and on the client. The wheel ground
  * check reads this instead of scanning entities, so a level with no contraption costs one map
- * read per wheel ray. Join and leave events keep it current.
+ * read per wheel ray. Bounds for the rest are cached once per tick by {@link WheelContactRuntime}. Join and leave events keep it current.
  */
 public final class LiveContraptions {
     private static final Map<Level, Set<AbstractContraptionEntity>> LIVE = new ConcurrentHashMap<>();
@@ -53,6 +53,7 @@ public final class LiveContraptions {
     public static void onUnload(LevelEvent.Unload event) {
         if (event.getLevel() instanceof Level level) {
             LIVE.remove(level);
+            WheelContactRuntime.forget(level);
         }
     }
 
