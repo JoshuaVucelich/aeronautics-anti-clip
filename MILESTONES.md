@@ -8,36 +8,36 @@ This repo is not published to Modrinth or CurseForge.
 
 Each milestone bumps `mod_version` so the built jar hash changes. Headless repros live in `:sim:test` and do not start Minecraft or Rapier.
 
-## M0 — Project, config, headless harness
+## M0: Project, config, headless harness
 
 - NeoForge mod skeleton, common config, and a Minecraft-free sim module.
 - `HeadlessLandingHarness` integrates gravity with protection off, so a dropped body falls.
 - Test: `HarnessBaselineTest`.
 
-## M1 — Void rescue
+## M1: Void rescue
 
 - Remember each sub-level's last safe pose, keyed by dimension and ship id.
 - Shift Y in place only when the pose is valid and the bounds are at or just inside Sable's `sub_level_remove` check. Min build height is not a trigger.
 - An invalid pose with no recent, nearby last safe pose is left for Sable. It is not rebuilt at the origin.
 - Repro: `VoidRescueTest` (in-place clamp at the remove bound, fail-open NaN, stale or distant last safe pose ignored).
 
-## M2 — Contraption colliders in Sable/Rapier
+## M2: Contraption colliders in Sable/Rapier
 
 - Feed elevator, bearing (including clockwork and stabilized), piston, and gantry colliders into Sable's kinematic pipeline.
 - World contraptions are owned by this mod. Contraptions already inside a sub-level stay on Sable's own path.
 - Repro: `ColliderFeedTest` (elevator is added, a windmill-only or unknown kind is ignored, a block change rebuilds, removal unfeeds).
 
-## M3 — Carry / parent
+## M3: Carry / parent
 
 - A sub-level resting on a moving contraption takes that contraption's translation, or its bearing rotation about the pivot.
-- Repro: `CarryTest` — a car on an elevator that jumps upward stays on the platform; bearing, piston, and gantry cases move with the support instead of falling through.
+- Repro: `CarryTest`: a car on an elevator that jumps upward stays on the platform; bearing, piston, and gantry cases move with the support instead of falling through.
 
-## M4 — Swept penetration limit
+## M4: Swept penetration limit
 
 - Sweep the sub-level's displacement against contraption volumes and stop it so remaining overlap is at most `maxPenetration`.
-- Repro: `SweepTest` — a fast body does not tunnel through a thin platform; discrete overlap alone would miss.
+- Repro: `SweepTest`: a fast body does not tunnel through a thin platform; discrete overlap alone would miss.
 
-## M5 — Hardening and release candidate
+## M5: Hardening and release candidate
 
 - Spatial hash, merged support boxes, NaN rejection, per-feature kill switches, and a rate-limited failure path.
 - Repro: `HardeningTest`.
@@ -46,7 +46,7 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - A separate bedrock rescue restores a sub-level that has stayed below min build height minus 32 blocks for 40 ticks to its last safe pose in the same dimension, with velocity zeroed. It does not use the 32-block distance gate, and it does not fire at the remove bounds.
 - Version `0.6.0-rc.24` jar. Still not published to Modrinth or CurseForge.
 
-## M6 — Failure scenarios
+## M6: Failure scenarios
 
 - `docs/FAILURE_SCENARIOS.md` records the elevator fall, a frozen-grabber deletion, and the surrounding cases.
 - Carry releases on chunk unload without teleporting, refuses a one-tick step past 4 blocks or 90 degrees, and skips the ride velocity when a physics substep is longer than 0.25 seconds. A car on a carried ship is translated with that ship. New captures examine at most 32 ships a tick and stop at 32 locks.
@@ -108,3 +108,16 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - On a sliding deck, a ship moving more than 2 blocks per second across it, relative to the deck, restarts the confirm and logs `LIVE deck skid` once. A flung or pushed ship is captured only after it has stopped on the deck. Turntables are not checked.
 - Wheel trial adds `heavy-up-16` and `heavy-down-16` (the real server's elevator speed) and `heavy-fling-16`, which scripts the real fling (113 blocks per second) and skid (50 blocks per second for 6 ticks) on a 27x27 deck. `-Dsable_safe_landing.cases=a,b` runs only the named cases.
 - Version `0.7.0-rc.7` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.8
+
+- Fixes the server stall on Huge Josh Land. With rc.5 and rc.7 the main thread froze for about 70 seconds at a time while the elevator contraption was loaded, even with nothing on it. Cause: every physics tick, carry rebuilt support boxes for every block of every loaded world contraption and joined them with `AabbMerger`, which restarts its pair search after every join. That cost grows with the cube of the block count: 2,229 blocks took 1.8 s per tick in the stress trial, and 6,854 blocks took about 50 s in a bench. The code dates from 0.6.0-rc.2 and was first run on the server today. The wheel ray code was not the cause.
+- Deck work now runs only while a ship is on or next to a contraption deck. A bounds test against Sable's ship boxes decides that, never a block scan. The deck shapes are built only while that deck has moved in the last 40 ticks or holds a ship. A deck with nothing on it costs a motion sample and one box test per tick.
+- Deck shapes come from a per-contraption index of block cells, built once per contraption shape a slice at a time, and only for the part of the deck within reach of a ship. Blocks are joined with `GridMerger`, a greedy mesh that is close to linear: a 5,985-block layout that took `AabbMerger` 37 s takes about 5 ms, and 45,913 blocks take about 33 ms. On the live path only the reachable part of a deck is merged. A deck turned off a quarter turn only joins blocks along its axis, so the rotated boxes cover the same space as before.
+- New config `tickBudgetMicros`, default 2000 (2 ms), range 0 to 50000. It is a hard cap per dimension per server tick on deck index building and deck shapes, and separately on wheel rays against decks. Past the cap the carry reuses the last deck shape and wheel rays keep Offroad's own result for the rest of the tick. 0 turns deck work off.
+- The collider feed plans once per game tick instead of every physics substep, reads the live contraption list instead of every entity, caches each contraption's shape hash, skips re-planning while nothing changed (at most 20 ticks), and does not retry a collider that failed to build until its shape changes.
+- Carry capture checks that the deck is moving before any block test, and only looks at ships whose box touches a deck. The ship block test stops after 32,768 cells.
+- `/anticlip status` adds `tickBudgetMicros`, the mod's mean and worst time per tick, the deck index count, and how often each budget ran out. The log notes `LIVE feed collider` and `LIVE deck index` with block counts and build time.
+- Stress trial: `-Dsable_safe_landing.stress=true` (`stress.half`, `stress.layers`, `stress.rpm`, `stress.modOff`). A large glued elevator, a heavy wheeled ship parked away from it, and a fake player on the deck; then a second heavy ship rides the elevator. Logs tick time and the mod's own time per phase.
+- Version `0.7.0-rc.8` jar. Still not published to Modrinth or CurseForge.
+

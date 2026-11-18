@@ -451,7 +451,7 @@ public final class WheelTrial {
      * 135 blocks), and four wheel mounts with large tires at the corners (z -3 facing north,
      * z +3 facing south), so the wheels sit at z -4 and z +4.
      */
-    private static ServerSubLevel assembleHeavy(ServerLevel level, BlockPos center) {
+    static ServerSubLevel assembleHeavy(ServerLevel level, BlockPos center) {
         List<BlockPos> blocks = new ArrayList<>();
         Item tire = BuiltInRegistries.ITEM.get(ResourceLocation.parse("offroad:large_tire"));
         for (int x = -2; x <= 2; x++) {
@@ -484,7 +484,7 @@ public final class WheelTrial {
     }
 
     /** Same pulley layout as the live trial, with the pulley motor at {@code rpm}. */
-    private static BlockEntity elevatorAt(ServerLevel level, BlockPos base, int rpm) {
+    static BlockEntity elevatorAt(ServerLevel level, BlockPos base, int rpm) {
         BlockPos pulleyPos = base.offset(0, 20, 0);
         LiveTrial.place(level, pulleyPos, "create:elevator_pulley", Direction.NORTH);
         LiveTrial.motor(level, pulleyPos.west(), Direction.EAST, rpm);
