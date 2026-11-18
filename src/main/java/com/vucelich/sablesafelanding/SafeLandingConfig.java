@@ -6,7 +6,7 @@ import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.7.0-rc.7";
+    public static final String VERSION = "0.7.0-rc.8";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -24,6 +24,9 @@ public final class SafeLandingConfig {
     public static final ModConfigSpec.IntValue CONFIG_VERSION;
     public static final ModConfigSpec.BooleanValue ENABLED;
     public static final ModConfigSpec.BooleanValue WHEEL_CONTACT;
+    public static final ModConfigSpec.IntValue TICK_BUDGET_MICROS;
+    /** Default for {@link #TICK_BUDGET_MICROS}: 2 ms, 4% of a 50 ms tick. */
+    public static final int DEFAULT_TICK_BUDGET_MICROS = 2_000;
 
     static {
         AntiClipConfig defaults = AntiClipConfig.defaults();
@@ -70,8 +73,11 @@ public final class SafeLandingConfig {
                 .comment("Consecutive ticks the sub-level must stay below that line before it is restored.")
                 .defineInRange("bedrockTicks", defaults.bedrockTicks(), 1, 20_000);
         WHEEL_CONTACT = builder
-                .comment("On by default. Lets Aeronautics wheel mounts find the ground on a moving elevator, bearing, piston, or gantry deck, so a car can drive on and off. Off leaves the wheel ground ray exactly as Offroad casts it. Needed on the server for driving and on the client for where the wheels are drawn. Not synced: the server value decides driving and carry, the client value only changes where its wheels are drawn. A ship far from every contraption costs three map reads per wheel ray.")
+                .comment("On by default. Lets Aeronautics wheel mounts find the ground on a moving elevator, bearing, piston, or gantry deck, so a car can drive on and off. Off leaves the wheel ground ray exactly as Offroad casts it. Needed on the server for driving and on the client for where the wheels are drawn. Not synced: the server value decides driving and carry, the client value only changes where its wheels are drawn. A wheel far from every contraption deck gets Offroad's ray unchanged, after two map reads.")
                 .define("wheelContact", true);
+        TICK_BUDGET_MICROS = builder
+                .comment("Performance. Hard cap, in microseconds per game tick per dimension, on deck work: building a contraption's deck index, the carry's deck shapes, and wheel rays against decks each get this much. The work only runs while a ship is on or next to an elevator or other contraption deck; with nothing on a deck it does nothing. When the cap runs out the rest waits for the next tick: the carry reuses the last deck shape and wheel rays fall back to Offroad's own ray, so it never stalls the server. Default 2000 (2 ms). 0 turns deck work off.")
+                .defineInRange("tickBudgetMicros", DEFAULT_TICK_BUDGET_MICROS, 0, 50_000);
         CONFIG_VERSION = builder
                 .comment("Internal. 0 means this file was written before carry defaulted on. Loading migrates that file to carry=true and stores 1. A later edit that turns carry off is kept.")
                 .defineInRange("configVersion", 0, 0, 1_000);
@@ -123,6 +129,15 @@ public final class SafeLandingConfig {
     }
 
     private SafeLandingConfig() {
+    }
+
+    /** The per-tick deck work cap in microseconds. A config that is not loaded yet uses the default. */
+    public static int tickBudgetMicros() {
+        try {
+            return TICK_BUDGET_MICROS.getAsInt();
+        } catch (RuntimeException ex) {
+            return DEFAULT_TICK_BUDGET_MICROS;
+        }
     }
 
     public static AntiClipConfig snapshot() {

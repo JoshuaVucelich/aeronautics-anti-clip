@@ -37,6 +37,10 @@ public final class SableSafeLanding {
         if (WheelTrial.enabled()) {
             NeoForge.EVENT_BUS.addListener(WheelTrial::onTick);
         }
+        if (StressTrial.enabled()) {
+            NeoForge.EVENT_BUS.addListener(StressTrial::onTickStart);
+            NeoForge.EVENT_BUS.addListener(StressTrial::onTick);
+        }
         LOGGER.info("Aeronautics Anti-Clip {} loaded", SafeLandingConfig.VERSION);
     }
 

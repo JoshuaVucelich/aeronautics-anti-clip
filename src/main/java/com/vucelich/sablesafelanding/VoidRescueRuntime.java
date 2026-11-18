@@ -73,6 +73,15 @@ public final class VoidRescueRuntime {
     }
 
     public static void onPrePhysics(ForgeSablePrePhysicsTickEvent event) {
+        long start = System.nanoTime();
+        try {
+            prePhysics(event);
+        } finally {
+            PerfMeter.add(PerfMeter.Part.RESCUE, System.nanoTime() - start);
+        }
+    }
+
+    private static void prePhysics(ForgeSablePrePhysicsTickEvent event) {
         SubLevelPhysicsSystem system = event.getPhysicsSystem();
         if (system == null || system.getLevel() == null) {
             return;

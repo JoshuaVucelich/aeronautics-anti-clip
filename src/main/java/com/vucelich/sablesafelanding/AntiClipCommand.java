@@ -32,7 +32,7 @@ public final class AntiClipCommand {
         AntiClipConfig config = SafeLandingConfig.snapshot();
         String text = String.format(
                 java.util.Locale.ROOT,
-                "Aeronautics Anti-Clip %s enabled=%s carry=%s feed=%s sweep=%s voidRescue=%s bedrockRescue=%s wheelContact=%s wheelDeckHits=%d wheelTouches=%d locks=%d held=%d removalHook=%s",
+                "Aeronautics Anti-Clip %s enabled=%s carry=%s feed=%s sweep=%s voidRescue=%s bedrockRescue=%s wheelContact=%s wheelDeckHits=%d wheelTouches=%d locks=%d held=%d removalHook=%s tickBudgetMicros=%d modMeanUs=%.1f modWorstUs=%d deckIndexes=%d budgetOutTicks=%d wheelBudgetSkips=%d",
                 SafeLandingConfig.VERSION,
                 config.enabled(),
                 config.carry(),
@@ -45,7 +45,13 @@ public final class AntiClipCommand {
                 WheelContactRuntime.touchCount(),
                 CarryRuntime.lockCount(),
                 CarryRuntime.heldCount(),
-                VoidRescueRuntime.removalHookSeen()
+                VoidRescueRuntime.removalHookSeen(),
+                SafeLandingConfig.tickBudgetMicros(),
+                PerfMeter.meanMicros(),
+                PerfMeter.worstMicros(),
+                DeckShapes.count(),
+                CarryRuntime.budgetExhaustedTicks(),
+                WheelContactRuntime.budgetSkips()
         );
         source.sendSuccess(() -> Component.literal(text), false);
         return Command.SINGLE_SUCCESS;
