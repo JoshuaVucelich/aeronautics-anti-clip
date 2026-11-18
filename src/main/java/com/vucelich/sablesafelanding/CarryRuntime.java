@@ -104,13 +104,13 @@ public final class CarryRuntime {
         private final AbstractContraptionEntity contraption;
         private final String contraptionId;
         private final ServerSubLevel ship;
-        private final Vec3 local;
+        private Vec3 local;
         private final Vec3 axis;
-        private final double orientationX;
-        private final double orientationY;
-        private final double orientationZ;
-        private final double orientationW;
-        private final double capturedAngle;
+        private double orientationX;
+        private double orientationY;
+        private double orientationZ;
+        private double orientationW;
+        private double capturedAngle;
         private double lastAnchorX;
         private double lastAnchorY;
         private double lastAnchorZ;
@@ -121,6 +121,8 @@ public final class CarryRuntime {
         private int contactTicks;
         /** The last placement gave the ship a ride velocity, so a stop has to clear it once. */
         private boolean riding;
+        /** The skid line is logged once per lock. */
+        private boolean skidLogged;
         private int takeoffTicks;
         private boolean confirmed;
         /** Log body velocity against the pose delta once, on the tick after the first teleport. */
@@ -488,7 +490,24 @@ public final class CarryRuntime {
         if (contact == CarryGate.Contact.RESTING) {
             lock.missTicks = 0;
             lock.contactTicks++;
-            if (lock.contactTicks >= CarryGate.CONTACT_HOLD) {
+            // Only on a sliding deck: the confirm has already given the ship the deck's speed, so
+            // anything faster across it is a push. A turntable is not checked, because a ship parked
+            // on it is still while the planks under it move.
+            Vec3 body = bodyVelocity(level, ship);
+            Vec3 ride = slidingVelocity(level, lock);
+            if (body != null && ride != null && !CarryGate.settled(body, ride)) {
+                // Crossing or skidding over the deck, not riding it. Start the confirm again.
+                if (!lock.skidLogged) {
+                    lock.skidLogged = true;
+                    SableSafeLanding.LOGGER.info(
+                            "LIVE deck skid ship {} speed={}",
+                            shipId,
+                            fmt(Math.sqrt(body.x() * body.x() + body.z() * body.z()))
+                    );
+                }
+                lock.contactTicks = 1;
+            }
+            if (lock.contactTicks >= CarryGate.CONTACT_HOLD && rebase(level, lock, ship)) {
                 lock.confirmed = true;
                 lock.idleTicks = 0;
                 lock.missTicks = 0;
@@ -731,9 +750,84 @@ public final class CarryRuntime {
         if (ride == null || pipeline == null) {
             return;
         }
+        // The whole velocity, sideways too. A ship that touches a moving deck with nobody steering
+        // stops on it instead of rolling off; a steering player drops the lock before this runs.
         pipeline.wakeUp(ship);
         setRideVelocity(pipeline, ship, ride);
         lock.riding = true;
+    }
+
+    /** This tick's deck velocity in blocks per second, or null when the deck is not sliding. */
+    private static Vec3 slidingVelocity(ServerLevel level, DeckLock lock) {
+        Sample sample = SAMPLES.get(level.dimension().location() + "\0" + lock.contraptionId);
+        if (sample == null || sample.time != level.getGameTime()) {
+            return null;
+        }
+        return CarryGate.rideVelocity(sample.translation, sample.angleRadians);
+    }
+
+    /** Rapier body velocity, or null when it cannot be read. */
+    private static Vec3 bodyVelocity(ServerLevel level, ServerSubLevel ship) {
+        PhysicsPipeline pipeline = pipeline(level);
+        if (pipeline == null) {
+            return null;
+        }
+        try {
+            Vector3d read = pipeline.getLinearVelocity(ship, new Vector3d());
+            if (read == null || !Double.isFinite(read.x) || !Double.isFinite(read.y) || !Double.isFinite(read.z)) {
+                return null;
+            }
+            return new Vec3(read.x, read.y, read.z);
+        } catch (RuntimeException ex) {
+            logFailure(ex);
+            return null;
+        }
+    }
+
+    /**
+     * Store the deck-frame offset again on the tick the contact is confirmed. The provisional
+     * offset is from the first touch, and a ship that moved over the deck during the confirm
+     * was pulled back to that spot, or released as separated when it was more than 8 blocks away.
+     * Only the horizontal part is refreshed. The height stays the first touch's resting height,
+     * because a ship on a falling deck trails it during the confirm and that gap is not a seat.
+     * A bearing keeps the first-touch offset: the planks turned under a still ship during the
+     * confirm, and the first touch is the seat it is carried from.
+     */
+    private static boolean rebase(ServerLevel level, DeckLock lock, ServerSubLevel ship) {
+        Sample sample = SAMPLES.get(level.dimension().location() + "\0" + lock.contraptionId);
+        net.minecraft.world.phys.Vec3 live = lock.contraption.getAnchorVec();
+        double anchorX = live.x;
+        double anchorY = live.y;
+        double anchorZ = live.z;
+        double angle = Math.toRadians(deckAngle(lock.contraption));
+        if (sample != null && sample.time == level.getGameTime()) {
+            anchorX = sample.x;
+            anchorY = sample.y;
+            anchorZ = sample.z;
+            angle = Math.toRadians(sample.angle);
+        }
+        Vec3 pivot = new Vec3(anchorX + 0.5, anchorY + 0.5, anchorZ + 0.5);
+        Vector3dc position = ship.logicalPose().position();
+        if (lock.contraption instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
+            return true;
+        }
+        Vec3 fresh = DeckFollow.localOffset(new Vec3(position.x(), position.y(), position.z()), pivot, lock.axis, angle);
+        if (!fresh.finite()) {
+            return false;
+        }
+        Vec3 local = new Vec3(fresh.x(), lock.local.y(), fresh.z());
+        Quaterniondc boarded = ship.logicalPose().orientation();
+        lock.local = local;
+        lock.orientationX = boarded.x();
+        lock.orientationY = boarded.y();
+        lock.orientationZ = boarded.z();
+        lock.orientationW = boarded.w();
+        lock.capturedAngle = angle;
+        lock.lastPlacedAngle = angle;
+        lock.placedPivotX = pivot.x();
+        lock.placedPivotY = pivot.y();
+        lock.placedPivotZ = pivot.z();
+        return true;
     }
 
     /**

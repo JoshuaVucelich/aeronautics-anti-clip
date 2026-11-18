@@ -135,4 +135,15 @@ class CarryGateTest {
         org.junit.jupiter.api.Assertions.assertNull(CarryGate.rideVelocity(new Vec3(Double.NaN, 0.0, 0.0), 0.0));
         org.junit.jupiter.api.Assertions.assertNull(CarryGate.rideVelocity(null, 0.0));
     }
+
+    @Test
+    void aShipSkiddingAcrossTheDeckIsNotSettled() {
+        Vec3 deck = new Vec3(0.0, 0.5, 0.0);
+        assertTrue(CarryGate.settled(new Vec3(0.3, 2.9, -0.2), deck));
+        assertTrue(CarryGate.settled(new Vec3(1.0, 0.0, 1.0), null));
+        // The real server log: a ship flung at 112.9 blocks per second, then skidding 15 blocks.
+        assertFalse(CarryGate.settled(new Vec3(-60.0, 0.5, -11.0), deck));
+        assertFalse(CarryGate.settled(new Vec3(2.5, 0.5, 0.0), deck));
+        assertFalse(CarryGate.settled(new Vec3(Double.NaN, 0.0, 0.0), deck));
+    }
 }

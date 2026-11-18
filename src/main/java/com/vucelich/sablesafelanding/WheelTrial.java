@@ -65,14 +65,32 @@ public final class WheelTrial {
             new Case("heavy-down-128", true, true, -2, 0, 0, 0, true, 128),
             new Case("heavy-up-256", true, true, 2, 0, 0, 0, true, 256),
             new Case("heavy-down-256", true, true, -2, 0, 0, 0, true, 256),
-            new Case("heavy-up-256-off", true, false, 2, 0, 0, 0, true, 256)
+            new Case("heavy-up-256-off", true, false, 2, 0, 0, 0, true, 256),
+            // The real server's elevator stepped 0.025 blocks a tick, which is 16 rpm here.
+            new Case("heavy-up-16", true, true, 2, 0, 0, 0, true, 16),
+            new Case("heavy-down-16", true, true, -2, 0, 0, 0, true, 16),
+            // The real server's sequence: while carried, the ship is flung sideways at 113 blocks
+            // per second (spike), then skids across a wide deck at 50 blocks per second for six
+            // ticks before friction takes over. rc.6 and earlier captured it mid-skid and released
+            // it as separated. The deck is 27x27 so the skid stays on it.
+            new Case("heavy-fling-16", true, true, 2, 0, 10, 0, true, 16)
     };
     private static final boolean HEAVY_ONLY = Boolean.getBoolean("sable_safe_landing.heavyOnly");
-    private static final Case[] RUN = HEAVY_ONLY
-            ? java.util.Arrays.stream(CASES).filter(Case::heavy).toArray(Case[]::new)
-            : CASES;
+    /** Comma-separated case names to run, or empty for all. */
+    private static final String ONLY = System.getProperty("sable_safe_landing.cases", "");
+    private static final Case[] RUN = java.util.Arrays.stream(CASES)
+            .filter(c -> !HEAVY_ONLY || c.heavy())
+            .filter(c -> ONLY.isEmpty() || java.util.Arrays.asList(ONLY.split(",")).contains(c.name()))
+            .toArray(Case[]::new);
     private static final int HEAVY_DECK = 5;
     private static final int HEAVY_RIDE = 200;
+    /** Ticks for an 8 block ride at 16 rpm (0.025 blocks a tick), with room to settle. */
+    private static final int SLOW_RIDE = 400;
+    private static final int FLING_DECK = 13;
+    private static final int FLING_AT = 60;
+    private static final double FLING_SPEED = 113.0;
+    private static final double SKID_SPEED = 50.0;
+    private static final int SKID_TICKS = 6;
 
     private static final int SPACING = 40;
     private static final int DECK = 3;
@@ -248,13 +266,17 @@ public final class WheelTrial {
                 callElevator(c);
             }
             if (c.ride != 0 && t > SETTLE && contraption != null) {
+                if (fling(c)) {
+                    flingStep(level, c, t - SETTLE);
+                }
                 trackRide(level, c, t, gap);
             }
             if (c.ride != 0 && t == SETTLE + rideTicks(c)) {
                 double deckMoved = contraption == null ? Double.NaN : contraption.getAnchorVec().y - rideDeckStart;
                 double shipMoved = ship.isRemoved() ? Double.NaN : ship.logicalPose().position().y() - rideShipStart;
-                log("{} RESULT after ride rpm={} gap={} settledGap={} minGap={} maxGap={} maxLag={} deckMoved={} shipMoved={} heldTicks={} hits={} anchorY={} {}",
-                        c.name, c.rpm, LiveTrial.fmt(gap), LiveTrial.fmt(settledGap), LiveTrial.fmt(rideMinGap), LiveTrial.fmt(rideMaxGap),
+                double endRelX = ship.isRemoved() ? Double.NaN : ship.logicalPose().position().x() - base.getX();
+                log("{} RESULT after ride rpm={} relX={} gap={} settledGap={} minGap={} maxGap={} maxLag={} deckMoved={} shipMoved={} heldTicks={} hits={} anchorY={} {}",
+                        c.name, c.rpm, LiveTrial.fmt(endRelX), LiveTrial.fmt(gap), LiveTrial.fmt(settledGap), LiveTrial.fmt(rideMinGap), LiveTrial.fmt(rideMaxGap),
                         LiveTrial.fmt(rideMaxLag), LiveTrial.fmt(deckMoved), LiveTrial.fmt(shipMoved), rideHeldTicks,
                         WheelContactRuntime.deckHits() - hitsAtStart,
                         contraption == null ? "none" : LiveTrial.fmt(contraption.getAnchorVec().y), describe(ship));
@@ -368,11 +390,41 @@ public final class WheelTrial {
     }
 
     private static int rideTicks(Case c) {
-        return c.heavy ? HEAVY_RIDE : RIDE;
+        return c.heavy ? (c.rpm <= 16 ? SLOW_RIDE : HEAVY_RIDE) : RIDE;
     }
 
     private static int deckHalf(Case c) {
-        return c.heavy ? HEAVY_DECK : DECK;
+        return fling(c) ? FLING_DECK : c.heavy ? HEAVY_DECK : DECK;
+    }
+
+    private static boolean fling(Case c) {
+        return c.name.contains("fling");
+    }
+
+    /**
+     * Scripted fling: one tick at {@link #FLING_SPEED} sideways, then {@link #SKID_TICKS} ticks
+     * held at {@link #SKID_SPEED}, the way the real ship crossed its deck. Vertical speed is kept.
+     */
+    private static void flingStep(ServerLevel level, Case c, int r) {
+        double speed;
+        if (r == FLING_AT) {
+            speed = FLING_SPEED;
+        } else if (r > FLING_AT && r <= FLING_AT + SKID_TICKS) {
+            speed = SKID_SPEED;
+        } else {
+            return;
+        }
+        SubLevelPhysicsSystem system = SubLevelPhysicsSystem.get(level);
+        if (system == null || ship == null || ship.isRemoved()) {
+            return;
+        }
+        org.joml.Vector3d body = system.getPipeline().getLinearVelocity(ship, new org.joml.Vector3d());
+        double vy = body == null || !Double.isFinite(body.y) ? 0.0 : body.y;
+        system.getPipeline().wakeUp(ship);
+        system.getPipeline().resetVelocity(ship);
+        system.getPipeline().addLinearAndAngularVelocity(ship, new org.joml.Vector3d(-speed, vy, 0.0), new org.joml.Vector3d());
+        log("{} fling r={} vx={} relX={} held={}", c.name, r, LiveTrial.fmt(-speed),
+                LiveTrial.fmt(ship.logicalPose().position().x() - (24 + index * SPACING)), LiveTrial.held(ship));
     }
 
     /** Per-tick ride samples: the gap to the deck and how far the ship trails the deck's travel. */
@@ -552,7 +604,7 @@ public final class WheelTrial {
         controller = null;
         for (int y = 1; y <= 24; y++) {
             for (int x = -16; x <= 16; x++) {
-                for (int z = -6; z <= 6; z++) {
+                for (int z = -14; z <= 14; z++) {
                     level.setBlockAndUpdate(base.offset(x, y, z), Blocks.AIR.defaultBlockState());
                 }
             }

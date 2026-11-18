@@ -202,6 +202,26 @@ public final class CarryGate {
         return sliding(translation, angleRadians) ? translation.mul(20.0) : null;
     }
 
+    /**
+     * Horizontal speed, in blocks per second relative to the deck, past which a ship is crossing
+     * the deck and not riding it. A ship flung across a deck, or skidding off it, does not confirm.
+     */
+    public static final double SETTLE_SPEED = 2.0;
+
+    /**
+     * True when a ship touching a sliding deck is not moving across it. {@code deckVelocity} may
+     * be null for a still deck.
+     */
+    public static boolean settled(Vec3 bodyVelocity, Vec3 deckVelocity) {
+        if (bodyVelocity == null || !bodyVelocity.finite()) {
+            return false;
+        }
+        Vec3 deck = deckVelocity == null || !deckVelocity.finite() ? Vec3.ZERO : deckVelocity;
+        double dx = bodyVelocity.x() - deck.x();
+        double dz = bodyVelocity.z() - deck.z();
+        return dx * dx + dz * dz <= SETTLE_SPEED * SETTLE_SPEED;
+    }
+
     public static boolean teleport(double driftSquared, double angleSincePlaceRadians) {
         return driftSquared > DRIFT * DRIFT || Math.abs(angleSincePlaceRadians) > ANGLE_DRIFT;
     }
