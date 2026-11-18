@@ -25,11 +25,13 @@ The sim module does not start Minecraft or link Rapier.
 ./gradlew build
 ```
 
-The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.7.0-rc.7`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
+The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.7.0-rc.8`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
 
 `/anticlip status` prints the master switch, the feature flags, the carry locks, and whether the Sable removal hook has run. `/anticlip off` and `/anticlip on` (permission level 2) flip `enabled` and save it. Off disables rescue, the collider feed, carry, and sweep. Failure cases and the guards for them are in `docs/FAILURE_SCENARIOS.md`.
 
 A dedicated server started with `-Dsable_safe_landing.live=true` runs a scripted trial: a sub-level below min build height, a sub-level at Sable's remove bound, and a vehicle on an elevator, a bearing, and a piston. It logs lines prefixed with `LIVE` and then stops.
+
+A dedicated server started with `-Dsable_safe_landing.stress=true` runs the stress trial: a large glued elevator contraption (`-Dsable_safe_landing.stress.half` and `.layers` set its size), a heavy wheeled ship parked away from it, and a fake player on the deck. It measures server tick time and this mod's own time with nothing on the elevator (stopped, then moving), then drops a second heavy ship on the deck and rides it down. `-Dsable_safe_landing.stress.modOff=true` runs the same script with the master switch off. Lines start with `STRESS`.
 
 A dedicated server started with `-Dsable_safe_landing.wheels=true` runs the wheel trial: a four-wheel car (Offroad wheel mounts and tires) on the ground, parked on an elevator deck, riding the elevator up and down, driving off the deck, driving onto it, driving while the elevator moves, and parked on a turning bearing deck at its center and off-center. Each case runs with `wheelContact` on and off. It logs lines prefixed with `WHEELS` and then stops.
 
@@ -46,6 +48,12 @@ Wheels on a deck also count as resting contact for carry. A car on its suspensio
 `wheelContact` is a common config value and is not synced. The server's value decides driving and carry. A client reads its own file, which only changes where its wheels are drawn.
 
 `/anticlip status` prints `wheelContact`, `wheelDeckHits` (server wheel rays that stood on a deck since startup, so client rays and hits past the suspension reach are not counted), and `wheelTouches` (ships whose wheels touch a deck right now).
+
+## Performance
+
+Deck work only runs while a ship is on or next to a contraption deck. Each tick the mod compares Sable's ship boxes with the contraption bounds; with no overlap it does nothing more for that deck. A deck with a ship on it gets a block index once per contraption shape, built in slices, and the carry only turns the part of the deck within reach of a ship into shapes, only while the deck is moving or holding a ship. Wheel rays far from every deck are Offroad's own ray.
+
+`tickBudgetMicros` (default 2000, so 2 ms of a 50 ms tick) is a hard cap per dimension per server tick on that work, with a separate cap of the same size for wheel rays against decks. When it runs out, the carry reuses the last deck shape and wheel rays keep Offroad's result until the next tick, so a huge contraption cannot stall the server. 0 turns deck work off. `/anticlip status` prints the cap, the mod's mean and worst time per tick, and how often each cap ran out.
 
 ## Carry
 

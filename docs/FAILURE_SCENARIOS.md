@@ -1,6 +1,6 @@
 # Failure scenarios
 
-Aeronautics vehicles are Sable sub-levels. The loss that started this mod is a car that fell through a moving Create elevator, then through bedrock. A second loss is an airship deleted after its grabbers froze. This note walks through how those happen and what `0.7.0-rc.7` does about each one.
+Aeronautics vehicles are Sable sub-levels. The loss that started this mod is a car that fell through a moving Create elevator, then through bedrock. A second loss is an airship deleted after its grabbers froze. This note walks through how those happen and what `0.7.0-rc.8` does about each one.
 
 The master switch is the config key `enabled` (default true). `/anticlip off` and `/anticlip on` flip it and save the file. `/anticlip status` prints the switch, the feature flags, how many carry locks are held, and whether the Sable removal hook has run. Off means no rescue, no collider feed, no carry, and no sweep. Disarm clears `sable$initialized` on every claim in the level, including a contraption that was displaced before its collider was uploaded. Turning the feed off in the config does the same restore. Sable's next tick adds its own kinematic collider again. Mixin injects use `require = 0`, the mixin config is not required, and each inject is wrapped so a missing target or a thrown callback logs and returns. Those warnings are limited to one every five seconds. The server tick is not crashed by a Sable or Create mismatch.
 
@@ -21,6 +21,10 @@ On the real server (rc.5, carry on, elevator stepping 0.025 blocks a tick), the 
 ## Wheels through an elevator deck
 
 A car with Offroad wheels driven onto an elevator rests on the deck with its body, and its wheels sink through the planks. The wheel mount finds the ground with `Level.clip`, and Sable's clip does not see contraption blocks. With no ground under the wheels there is no suspension and no drive, so the car sits on its hull and cannot drive on or off. `wheelContact` (default on) casts the same ray through nearby contraption blocks and returns the deck when it is closer. Wheels on a deck also count as carry contact, but only within the suspension reach and on an up-facing face, so a car hovering over a moving deck is not grabbed. With it off, the old behavior returns. Contraptions that are themselves inside a sub-level are not tested.
+
+## Server stall with a large contraption loaded (rc.5 and rc.7 server logs)
+
+On Huge Josh Land the main thread froze for about 70 seconds at a time, starting 20 to 30 seconds after a player joined and loaded the elevator, and again every minute or so until he left. It happened with no capture in the log. Every physics tick, carry built a support box for every block of every loaded world contraption and joined them with a pair search that restarted after each join. That grows with the cube of the block count, so a few thousand blocks took seconds per tick and about 7,000 took close to a minute. The stress trial reproduced it with 2,229 blocks and nothing on the elevator: 1.8 s per tick, with every stack sample in `AabbMerger.merge` under `CarryRuntime.supportsFor`. rc.8 does no deck work unless a ship is on or next to a deck, builds a block index once per contraption shape, shapes only the part a ship can reach, and caps that work with `tickBudgetMicros`. The same trial then runs at about 2 ms per tick, with 23,121 and 45,913 block elevators too.
 
 ## Airship deleted because grabbers froze
 
