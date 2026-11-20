@@ -639,10 +639,10 @@ public final class WheelTrial {
         }
         long calls = WheelContactRuntime.serverDeckCalls();
         long nanos = WheelContactRuntime.serverDeckNanos();
-        log("PERF java={} arch={} ticks={} modMeanUs={} modWorstUs={} deckRayCalls={} deckRayMeanNs={} budgetSkips={} parts={}",
+        log("PERF java={} arch={} ticks={} modMeanUs={} modWorstUs={} deckRayCalls={} deckRayMeanNs={} memoHits={} budgetSkips={} parts={}",
                 System.getProperty("java.vm.version"), System.getProperty("os.arch"), PerfMeter.ticks(),
                 String.format(java.util.Locale.ROOT, "%.1f", PerfMeter.meanMicros()), PerfMeter.worstMicros(),
-                calls, calls == 0 ? 0 : nanos / calls, WheelContactRuntime.budgetSkips(),
+                calls, calls == 0 ? 0 : nanos / calls, WheelContactRuntime.memoHits(), WheelContactRuntime.budgetSkips(),
                 java.util.Arrays.toString(PerfMeter.parts()));
         // The client's per-wheel check before any deck work: the switches and the cached deck list.
         net.minecraft.server.level.ServerLevel overworld = server.overworld();

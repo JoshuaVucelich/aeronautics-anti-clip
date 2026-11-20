@@ -163,8 +163,9 @@ public final class StressTrial {
             }
             if (tick == 1300) {
                 endPhase();
-                log("RESULT reload live={} uploads={} deferredUploads={}", LiveContraptions.in(level).size(),
-                        ColliderFeedRuntime.uploads(), ColliderFeedRuntime.deferredUploads());
+                log("RESULT reload live={} uploads={} deferredUploads={} lazyWaits={} memoHits={} memoMisses={} deckRays={} deckRayUs={} parkedSnaps={}", LiveContraptions.in(level).size(),
+                        ColliderFeedRuntime.uploads(), ColliderFeedRuntime.deferredUploads(), ColliderFeedRuntime.lazyWaits(),
+                        WheelContactRuntime.memoHits(), WheelContactRuntime.memoMisses(), WheelContactRuntime.serverDeckCalls(), WheelContactRuntime.serverDeckNanos() / 1000, VoidRescueRuntime.parkedSnaps());
                 log("RESULT mod overall meanUs={} worstUs={}", String.format(java.util.Locale.ROOT, "%.1f", PerfMeter.meanMicros()), PerfMeter.worstMicros());
                 finish(level.getServer());
             }
@@ -255,8 +256,9 @@ public final class StressTrial {
         } else if (tick == END + Math.max(0, CHURN) * 60 || (CHURN <= 0 && tick == END + 1)) {
             if (CHURN > 0) {
                 endPhase();
-                log("RESULT churn cycles={} uploads={} deferredUploads={} indexDeferred={}", CHURN,
-                        ColliderFeedRuntime.uploads(), ColliderFeedRuntime.deferredUploads(), DeckShapes.deferredBuilds());
+                log("RESULT churn cycles={} uploads={} deferredUploads={} indexDeferred={} lazyWaits={} memoHits={} memoMisses={} deckRays={} deckRayUs={} parkedSnaps={}", CHURN,
+                        ColliderFeedRuntime.uploads(), ColliderFeedRuntime.deferredUploads(), DeckShapes.deferredBuilds(),
+                        ColliderFeedRuntime.lazyWaits(), WheelContactRuntime.memoHits(), WheelContactRuntime.memoMisses(), WheelContactRuntime.serverDeckCalls(), WheelContactRuntime.serverDeckNanos() / 1000, VoidRescueRuntime.parkedSnaps());
             }
             log("RESULT ride settledGap={} minGap={} maxGap={} maxLag={} heldTicks={} heldDrops={} deckMoved={} riderRemoved={}",
                     LiveTrial.fmt(settledGap), LiveTrial.fmt(rideMinGap), LiveTrial.fmt(rideMaxGap), LiveTrial.fmt(rideMaxLag),
