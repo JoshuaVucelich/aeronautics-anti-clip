@@ -2,6 +2,7 @@ package com.vucelich.sablesafelanding;
 
 import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.Contraption;
+import com.vucelich.sablesafelanding.sim.Aabb;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import com.vucelich.sablesafelanding.sim.RateLimiter;
 import com.vucelich.sablesafelanding.sim.ColliderFeedPlanner;
@@ -159,6 +160,7 @@ public final class ColliderFeedRuntime {
         HASHES.clear();
         FAILED.clear();
         PENDING.clear();
+        FAR_CHECKED_AT.clear();
         UPLOADED_AT.clear();
     }
 
@@ -237,8 +239,9 @@ public final class ColliderFeedRuntime {
             SYNCED_AT.put(dimension, level.getGameTime());
             long[] planned = PLANNED.get(dimension);
             long now = level.getGameTime();
-            if (planned != null && planned[2] == 1L && planned[0] == liveKey(level)
-                    && now >= planned[1] && now - planned[1] < REPLAN_TICKS) {
+            long window = planned != null && planned[2] == 2L ? TAKEOVER_RECHECK : REPLAN_TICKS;
+            if (planned != null && planned[2] >= 1L && planned[0] == liveKey(level)
+                    && now >= planned[1] && now - planned[1] < window) {
                 // Same contraptions as last tick and every one already fed: only the motion samples.
                 sample(level);
                 return;
@@ -431,6 +434,7 @@ public final class ColliderFeedRuntime {
         CLAIMS.clear();
         CLAIMED.clear();
         PENDING.clear();
+        FAR_CHECKED_AT.clear();
     }
 
     private static void sync(ServerLevel level, PhysicsPipeline pipeline) {
@@ -468,19 +472,25 @@ public final class ColliderFeedRuntime {
             requests.add(new FeedRequest(id, kind, hash, inWorld, entity.isAlive()));
         }
         boolean settled = true;
+        boolean farWaiting = false;
         for (FeedAction action : planner.plan(requests, config.feedColliders())) {
-            if (action.type() != FeedAction.Type.KEEP) {
+            long lazyBefore = lazyWaits;
+            apply(pipeline, planner, fed, entities, action);
+            // A deck left on Sable's collider because no ship is near does not keep the
+            // dimension re-planning every tick. It is rechecked on the next full plan.
+            if (lazyWaits != lazyBefore) {
+                farWaiting = true;
+            } else if (action.type() != FeedAction.Type.KEEP) {
                 settled = false;
             }
-            apply(pipeline, planner, fed, entities, action);
         }
         for (FeedRequest request : requests) {
-            if (request.inWorld() && !fed.containsKey(request.id())) {
+            if (request.inWorld() && !fed.containsKey(request.id()) && !FAR_CHECKED_AT.containsKey(request.id())) {
                 // Waiting for its claim or its collider: keep planning every tick.
                 settled = false;
             }
         }
-        PLANNED.put(dimension, new long[]{liveKey(level), now, settled ? 1L : 0L});
+        PLANNED.put(dimension, new long[]{liveKey(level), now, !settled ? 0L : farWaiting ? 2L : 1L});
         sample(level);
     }
 
@@ -535,6 +545,12 @@ public final class ColliderFeedRuntime {
                         if (entity != null && entity.tickCount > 0) {
                             warnDeferred();
                         }
+                        return;
+                    }
+                    if (entity.level() instanceof ServerLevel nearLevel && !shipNearForTakeover(nearLevel, entity)) {
+                        // No ship anywhere near: Sable's own collider is enough until one comes.
+                        planner.forget(action.id());
+                        lazyWaits++;
                         return;
                     }
                     if (!(entity.level() instanceof ServerLevel serverLevel) || !uploadFits(serverLevel, entity)) {
@@ -597,6 +613,49 @@ public final class ColliderFeedRuntime {
         // Contraption object. Identity and block count find every change without reading a block,
         // so there is no per-block rehash and no once-a-minute recheck spike.
         return System.identityHashCode(contraption) * 0x9E3779B97F4A7C15L + contraption.getBlocks().size();
+    }
+
+    /** Blocks around a deck within which a ship makes the mod take the deck's collider over. */
+    static final double TAKEOVER_REACH = 48.0;
+    /** Seconds of a ship's own speed added to that reach. */
+    static final double TAKEOVER_SECONDS = 2.0;
+    /** Ticks between rechecks of a deck that had no ship near. */
+    static final long TAKEOVER_RECHECK = 10;
+    private static final Map<String, Long> FAR_CHECKED_AT = new HashMap<>();
+    private static long lazyWaits;
+
+    /** Decks left on Sable's own collider for a tick because no ship was near. */
+    public static long lazyWaits() {
+        return lazyWaits;
+    }
+
+    /**
+     * With idleSleep on, a deck's collider is only taken over while a ship is within
+     * {@link #TAKEOVER_REACH} blocks plus {@link #TAKEOVER_SECONDS} of its speed. A deck that
+     * nobody is near keeps Sable's own collider, so loading or assembling far-away contraptions
+     * does not pay for a second collider build. A far deck is rechecked every
+     * {@link #TAKEOVER_RECHECK} ticks.
+     */
+    private static boolean shipNearForTakeover(ServerLevel level, AbstractContraptionEntity entity) {
+        if (!SafeLandingConfig.idleSleep()) {
+            return true;
+        }
+        String key = entity.getUUID().toString();
+        long now = level.getGameTime();
+        Long checked = FAR_CHECKED_AT.get(key);
+        if (checked != null && now >= checked && now - checked < TAKEOVER_RECHECK) {
+            return false;
+        }
+        Aabb bounds = CarryRuntime.broadphaseBounds(entity);
+        if (DeckGate.anyShipWithin(level, bounds, TAKEOVER_REACH, TAKEOVER_SECONDS)) {
+            FAR_CHECKED_AT.remove(key);
+            return true;
+        }
+        if (FAR_CHECKED_AT.size() > 4096) {
+            FAR_CHECKED_AT.clear();
+        }
+        FAR_CHECKED_AT.put(key, now);
+        return false;
     }
 
     /**

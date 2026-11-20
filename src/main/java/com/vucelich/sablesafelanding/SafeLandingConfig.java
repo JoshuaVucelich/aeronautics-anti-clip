@@ -6,7 +6,7 @@ import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.7.0-rc.9";
+    public static final String VERSION = "0.7.0-rc.10";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -78,13 +78,13 @@ public final class SafeLandingConfig {
                 .comment("On by default. Lets Aeronautics wheel mounts find the ground on a moving elevator, bearing, piston, or gantry deck, so a car can drive on and off. Off leaves the wheel ground ray exactly as Offroad casts it. Needed on the server for driving and on the client for where the wheels are drawn. Not synced: the server value decides driving and carry, the client value only changes where its wheels are drawn. A wheel far from every contraption deck gets Offroad's ray unchanged, after two map reads.")
                 .define("wheelContact", true);
         TICK_BUDGET_MICROS = builder
-                .comment("Performance. Hard cap, in microseconds per game tick per dimension, shared by all deck work: building a contraption's deck index, the carry's deck shapes, and wheel rays against decks. Each step is checked against what is left before it starts, using the step's measured cost, so a step that would not fit waits for the next tick instead of running over. The carry reuses the last deck shape meanwhile and wheel rays use Offroad's own ray. Default 2000 (2 ms). 0 turns deck work off. Any value from 1 to 499 is raised to 500, the smallest cap that keeps a heavy ship riding at the deck's speed; below about 1000 a big deck can lag a ship a little on its first trip.")
+                .comment("Performance. Cap on background deck work, in microseconds per game tick per dimension: building a contraption's deck index, the carry's deck shapes, capture block tests, wheel rays against decks, and collider uploads after the first one in a tick. It does not cap placing a ship that is already riding, or the first collider upload in a tick. Each step is checked against what is left before it starts, using the step's measured cost, so a step that would not fit waits for the next tick instead of running over. The carry reuses the last deck shape meanwhile and wheel rays use Offroad's own ray. Default 2000 (2 ms). 0 turns deck work off. Any value from 1 to 499 is raised to 500, the smallest cap that keeps a heavy ship riding at the deck's speed; below about 1000 a big deck can lag a ship a little on its first trip.")
                 .defineInRange("tickBudgetMicros", DEFAULT_TICK_BUDGET_MICROS, 0, 50_000);
         IDLE_SLEEP = builder
-                .comment("Performance, on by default. While no ship is on or next to a moving elevator, bearing, piston, or gantry deck, the carry, deck shapes, and sweep do no work at all, ships are not scanned, and void rescue only reads each ship's height. Off runs the deck checks every tick like 0.7.0-rc.8 did. This never changes how a ship that is actually riding is carried.")
+                .comment("Performance, on by default. While no ship is on or next to a moving elevator, bearing, piston, or gantry deck, the carry, deck shapes, and sweep do no work at all, and ships are not scanned. Void rescue runs its full step only near the void floor, build ceiling, or bedrock line, and elsewhere copies each ship's pose every 10 ticks as its safe pose. A car parked on a still deck reuses its last wheel ray result. A deck's collider is taken over from Sable only while a ship is within 48 blocks. Off runs the deck checks every tick like 0.7.0-rc.8 did. This never changes how a ship that is actually riding is carried.")
                 .define("idleSleep", true);
         CLIENT_WHEEL_CONTACT = builder
-                .comment("Client only, on by default. Draws a wheel standing on a contraption deck at the deck instead of sunk through it. Costs nothing while the car is not near a deck. Off leaves the drawn wheel exactly as Offroad places it; driving is decided by the server either way.")
+                .comment("Client only, on by default. Tick logic, not render code: the client wheel ground ray also sees contraption decks, so the wheel extension Offroad later draws stands on a deck instead of sunk through it. Costs a few map reads per wheel ray while the car is not near a deck. Off leaves the drawn wheel exactly as Offroad places it; driving is decided by the server either way.")
                 .define("clientWheelContact", true);
         CONFIG_VERSION = builder
                 .comment("Internal. 0 means this file was written before carry defaulted on. Loading migrates that file to carry=true and stores 1. A later edit that turns carry off is kept.")

@@ -65,7 +65,7 @@ public final class AntiClipCommand {
         long[] rescue = VoidRescueRuntime.counts();
         String timing = String.format(
                 java.util.Locale.ROOT,
-                "Server time: mean %.2f us/tick, worst %d us over %d ticks; last minute mean %.2f us, worst %.0f us; ticks over 20 us %d; deck work ran in %d of %d level-ticks (idleSleep=%s); budget-out ticks %d, steps deferred %d, index builds deferred %d, collider uploads %d (deferred %d); void rescue full steps %d, skipped far from the void %d",
+                "Server time: mean %.2f us/tick, worst %d us over %d ticks; last minute mean %.2f us, worst %.0f us; ticks over 20 us %d; deck work ran in %d of %d level-ticks (idleSleep=%s); budget-out ticks %d, steps deferred %d, index builds deferred %d, collider uploads %d (deferred %d, waiting for a ship near %d), wheel rays from memory %d; void rescue full steps %d, skipped far from the void %d, parked safe-pose snapshots %d",
                 PerfMeter.meanMicros(),
                 PerfMeter.worstMicros(),
                 PerfMeter.ticks(),
@@ -80,8 +80,11 @@ public final class AntiClipCommand {
                 DeckShapes.deferredBuilds(),
                 ColliderFeedRuntime.uploads(),
                 ColliderFeedRuntime.deferredUploads(),
+                ColliderFeedRuntime.lazyWaits(),
+                WheelContactRuntime.memoHits(),
                 rescue[1],
-                rescue[0]
+                rescue[0],
+                VoidRescueRuntime.parkedSnaps()
         );
         source.sendSuccess(() -> Component.literal(timing), false);
         SableSafeLanding.LOGGER.info("{} | {}", text, timing);

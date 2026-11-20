@@ -105,11 +105,22 @@ public final class WheelContactRuntime {
     private record Candidate(AbstractContraptionEntity entity, Contraption contraption, Aabb reach) {
     }
 
-    private record LevelBounds(long gameTime, List<Candidate> all) {
+    private record LevelBounds(long gameTime, List<Candidate> all, long serverTick, int version) {
     }
 
-    private record ShipCandidates(long gameTime, List<Candidate> near) {
+    /**
+     * {@code far} means no deck was within the reach plus {@link #FAR_SLACK}. On the server such
+     * an answer is reused while no deck has moved, the contraption set is the same, and the ship
+     * has not moved {@link #FAR_SLACK} blocks, for at most {@link #FAR_TICKS} ticks.
+     */
+    private record ShipCandidates(long gameTime, List<Candidate> near, boolean far, long serverTick, int version,
+                                  double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
     }
+
+    /** Blocks a ship may move before a cached "no deck near" answer is checked again. */
+    static final double FAR_SLACK = 1.0;
+    /** Ticks a cached "no deck near" answer or a still deck list is trusted at most. */
+    static final long FAR_TICKS = 100;
 
     private WheelContactRuntime() {
     }
@@ -163,6 +174,7 @@ public final class WheelContactRuntime {
 
     /** Drops every cache and wheel touch. Called on server stop. */
     public static void clear() {
+        RAY_MEMO.clear();
         WHEEL_TOUCH.clear();
         BOUNDS.clear();
         SHIPS.clear();
@@ -225,13 +237,186 @@ public final class WheelContactRuntime {
         }
         long start = System.nanoTime();
         try {
-            return deckRay(level, context, base, wheelMount, CarryRuntime.budget(server));
+            SubLevel ship = shipOf(wheelMount);
+            if (ship != null && candidatesFor(level, ship, Decks.of(level)).isEmpty()) {
+                // This ship is not near any deck: Offroad's own ray, from the per-ship cache.
+                return base;
+            }
+            boolean memoOk = ship != null && SafeLandingConfig.idleSleep();
+            long tick = DeckGate.tickOf(server);
+            if (memoOk) {
+                BlockHitResult remembered = recall(server, context, base, wheelMount, ship, tick);
+                if (remembered != null) {
+                    return remembered;
+                }
+            }
+            long skipsBefore = BUDGET_SKIPS.get();
+            lastTouchDeck = null;
+            BlockHitResult result = deckRay(level, context, base, wheelMount, CarryRuntime.budget(server));
+            if (memoOk && BUDGET_SKIPS.get() == skipsBefore) {
+                remember(server, context, base, result, wheelMount, ship, tick, lastTouchDeck);
+            }
+            return result;
         } finally {
             long used = System.nanoTime() - start;
             PerfMeter.add(PerfMeter.Part.WHEEL, used);
             SERVER_DECK_CALLS.incrementAndGet();
             SERVER_DECK_NANOS.addAndGet(used);
         }
+    }
+
+    /**
+     * One wheel ray's last answer on the server. While no deck in the level has moved since it
+     * was made, no contraption joined or left, the ship has not moved, and Offroad's own ray
+     * still gives the same hit, the deck answer cannot have changed, so it is reused instead of
+     * cast again. This is what a car parked on a stopped deck costs: a few field compares per ray.
+     */
+    private static final class RayMemo {
+        double fx, fy, fz, tx, ty, tz;
+        double px, py, pz, qx, qy, qz, qw;
+        double bx, by, bz;
+        boolean baseMiss;
+        long tick;
+        int version;
+        BlockHitResult result;
+        String touchDeck;
+    }
+
+    /** Ticks a remembered ray answer is trusted at most, even when nothing moved. */
+    static final long MEMO_TICKS = 100;
+    private static final double MEMO_POS = 1.0e-3;
+    private static final double MEMO_ROT = 1.0e-5;
+    private static final Map<Object, RayMemo[]> RAY_MEMO = Collections.synchronizedMap(new WeakHashMap<>());
+    private static final AtomicLong MEMO_HITS = new AtomicLong();
+    /** Set by {@link #noteTouch} during one server cast: the deck the wheel stood on. */
+    private static String lastTouchDeck;
+
+    /** Server wheel rays answered from memory because nothing had moved. */
+    public static long memoHits() {
+        return MEMO_HITS.get();
+    }
+
+    private static final java.util.concurrent.atomic.AtomicLongArray MEMO_MISS = new java.util.concurrent.atomic.AtomicLongArray(7);
+
+    /** Memo misses by reason: none stored, contraption set changed, a deck moved, too old, Offroad's hit changed, ship moved, no stored ray matched. */
+    public static String memoMisses() {
+        return "[none=" + MEMO_MISS.get(0) + " set=" + MEMO_MISS.get(1) + " deckMoved=" + MEMO_MISS.get(2) + " age=" + MEMO_MISS.get(3)
+                + " base=" + MEMO_MISS.get(4) + " pose=" + MEMO_MISS.get(5) + " noRay=" + MEMO_MISS.get(6) + "]";
+    }
+
+    private static boolean sameRay(RayMemo memo, ClipContext context) {
+        Vec3 from = context.getFrom();
+        Vec3 to = context.getTo();
+        return memo.fx == from.x && memo.fy == from.y && memo.fz == from.z
+                && memo.tx == to.x && memo.ty == to.y && memo.tz == to.z;
+    }
+
+    private static boolean sameBase(RayMemo memo, BlockHitResult base) {
+        boolean miss = base == null || base.getType() == HitResult.Type.MISS;
+        if (miss || memo.baseMiss) {
+            return miss == memo.baseMiss;
+        }
+        Vec3 at = base.getLocation();
+        return Math.abs(at.x - memo.bx) <= MEMO_POS && Math.abs(at.y - memo.by) <= MEMO_POS && Math.abs(at.z - memo.bz) <= MEMO_POS;
+    }
+
+    private static BlockHitResult recall(net.minecraft.server.level.ServerLevel level, ClipContext context, BlockHitResult base,
+                                         Object wheelMount, SubLevel ship, long tick) {
+        RayMemo[] memos = RAY_MEMO.get(wheelMount);
+        if (memos == null) {
+            MEMO_MISS.incrementAndGet(0);
+            return null;
+        }
+        long lastMove = DeckGate.lastDeckMove(level);
+        int version = LiveContraptions.version();
+        Pose3dc pose = poseOf(level, ship);
+        for (RayMemo memo : memos) {
+            if (memo == null || !sameRay(memo, context)) {
+                continue;
+            }
+            if (memo.version != version) {
+                MEMO_MISS.incrementAndGet(1);
+                return null;
+            }
+            if (lastMove >= memo.tick) {
+                MEMO_MISS.incrementAndGet(2);
+                return null;
+            }
+            if (tick < memo.tick || tick - memo.tick > MEMO_TICKS) {
+                MEMO_MISS.incrementAndGet(3);
+                return null;
+            }
+            if (!sameBase(memo, base)) {
+                MEMO_MISS.incrementAndGet(4);
+                return null;
+            }
+            org.joml.Vector3dc p = pose.position();
+            org.joml.Quaterniondc q = pose.orientation();
+            if (Math.abs(p.x() - memo.px) > MEMO_POS || Math.abs(p.y() - memo.py) > MEMO_POS || Math.abs(p.z() - memo.pz) > MEMO_POS
+                    || Math.abs(q.x() - memo.qx) > MEMO_ROT || Math.abs(q.y() - memo.qy) > MEMO_ROT
+                    || Math.abs(q.z() - memo.qz) > MEMO_ROT || Math.abs(q.w() - memo.qw) > MEMO_ROT) {
+                MEMO_MISS.incrementAndGet(5);
+                return null;
+            }
+            MEMO_HITS.incrementAndGet();
+            if (memo.touchDeck != null) {
+                DECK_HITS.incrementAndGet();
+                WHEEL_TOUCH.put(ship.getUniqueId(), new WheelTouch(memo.touchDeck, level.getGameTime()));
+            }
+            return memo.result == null ? base : memo.result;
+        }
+        MEMO_MISS.incrementAndGet(6);
+        return null;
+    }
+
+    private static void remember(net.minecraft.server.level.ServerLevel level, ClipContext context, BlockHitResult base,
+                                 BlockHitResult result, Object wheelMount, SubLevel ship, long tick, String touchDeck) {
+        RayMemo[] memos = RAY_MEMO.computeIfAbsent(wheelMount, ignored -> new RayMemo[4]);
+        RayMemo slot = null;
+        int oldest = 0;
+        for (int i = 0; i < memos.length; i++) {
+            if (memos[i] == null) {
+                memos[i] = new RayMemo();
+                slot = memos[i];
+                break;
+            }
+            if (sameRay(memos[i], context)) {
+                slot = memos[i];
+                break;
+            }
+            if (memos[i].tick < memos[oldest].tick) {
+                oldest = i;
+            }
+        }
+        if (slot == null) {
+            slot = memos[oldest];
+        }
+        Vec3 from = context.getFrom();
+        Vec3 to = context.getTo();
+        slot.fx = from.x;
+        slot.fy = from.y;
+        slot.fz = from.z;
+        slot.tx = to.x;
+        slot.ty = to.y;
+        slot.tz = to.z;
+        Pose3dc pose = poseOf(level, ship);
+        slot.px = pose.position().x();
+        slot.py = pose.position().y();
+        slot.pz = pose.position().z();
+        slot.qx = pose.orientation().x();
+        slot.qy = pose.orientation().y();
+        slot.qz = pose.orientation().z();
+        slot.qw = pose.orientation().w();
+        slot.baseMiss = base == null || base.getType() == HitResult.Type.MISS;
+        if (!slot.baseMiss) {
+            slot.bx = base.getLocation().x;
+            slot.by = base.getLocation().y;
+            slot.bz = base.getLocation().z;
+        }
+        slot.tick = tick;
+        slot.version = LiveContraptions.version();
+        slot.result = result == base ? null : result;
+        slot.touchDeck = touchDeck;
     }
 
     /**
@@ -314,21 +499,45 @@ public final class WheelContactRuntime {
         if (cached != null && cached.gameTime == now) {
             return cached.near;
         }
+        BoundingBox3dc box = ship.boundingBox();
+        net.minecraft.server.level.ServerLevel server = level instanceof net.minecraft.server.level.ServerLevel sl
+                && SafeLandingConfig.idleSleep() ? sl : null;
+        long serverTick = server == null ? 0 : DeckGate.tickOf(server);
+        int version = LiveContraptions.version();
+        if (cached != null && cached.far && server != null && box != null && cached.version == version
+                && serverTick >= cached.serverTick && serverTick - cached.serverTick <= FAR_TICKS
+                && DeckGate.lastDeckMove(server) < cached.serverTick
+                && Math.abs(box.minX() - cached.minX) < FAR_SLACK && Math.abs(box.minY() - cached.minY) < FAR_SLACK
+                && Math.abs(box.minZ() - cached.minZ) < FAR_SLACK && Math.abs(box.maxX() - cached.maxX) < FAR_SLACK
+                && Math.abs(box.maxY() - cached.maxY) < FAR_SLACK && Math.abs(box.maxZ() - cached.maxZ) < FAR_SLACK) {
+            return List.of();
+        }
         List<Candidate> all = boundsFor(level, live, now);
         List<Candidate> near = List.of();
-        BoundingBox3dc box = ship.boundingBox();
+        boolean far = false;
         Aabb reach = box == null ? null
                 : WheelContact.shipReach(new Aabb(box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ()));
-        if (reach != null && !all.isEmpty()) {
-            List<Candidate> found = new ArrayList<>(2);
+        if (reach != null) {
+            Aabb wide = reach.expand(FAR_SLACK);
+            far = true;
+            List<Candidate> found = null;
             for (Candidate candidate : all) {
-                if (reach.intersects(candidate.reach)) {
-                    found.add(candidate);
+                if (wide.intersects(candidate.reach)) {
+                    far = false;
+                    if (reach.intersects(candidate.reach)) {
+                        if (found == null) {
+                            found = new ArrayList<>(2);
+                        }
+                        found.add(candidate);
+                    }
                 }
             }
-            near = found.isEmpty() ? List.of() : found;
+            near = found == null ? List.of() : found;
         }
-        SHIPS.put(ship, new ShipCandidates(now, near));
+        SHIPS.put(ship, box == null
+                ? new ShipCandidates(now, near, false, serverTick, version, 0, 0, 0, 0, 0, 0)
+                : new ShipCandidates(now, near, far, serverTick, version,
+                box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ()));
         return near;
     }
 
@@ -336,6 +545,17 @@ public final class WheelContactRuntime {
     private static List<Candidate> boundsFor(Level level, List<AbstractContraptionEntity> live, long now) {
         LevelBounds cached = BOUNDS.get(level);
         if (cached != null && cached.gameTime == now) {
+            return cached.all;
+        }
+        net.minecraft.server.level.ServerLevel server = level instanceof net.minecraft.server.level.ServerLevel sl
+                && SafeLandingConfig.idleSleep() ? sl : null;
+        long serverTick = server == null ? 0 : DeckGate.tickOf(server);
+        int version = LiveContraptions.version();
+        if (cached != null && server != null && cached.version == version && serverTick >= cached.serverTick
+                && serverTick - cached.serverTick <= FAR_TICKS && DeckGate.lastDeckMove(server) < cached.serverTick) {
+            // No deck moved and no contraption joined or left: the bounds are the same.
+            BOUNDS.put(level, new LevelBounds(now, cached.all, cached.serverTick, cached.version));
+            prune(level, now);
             return cached.all;
         }
         List<Candidate> all = new ArrayList<>();
@@ -355,7 +575,7 @@ public final class WheelContactRuntime {
                 all.add(new Candidate(entity, contraption, reach));
             }
         }
-        BOUNDS.put(level, new LevelBounds(now, all));
+        BOUNDS.put(level, new LevelBounds(now, all, serverTick, version));
         prune(level, now);
         return all;
     }
@@ -456,7 +676,9 @@ public final class WheelContactRuntime {
             return;
         }
         DECK_HITS.incrementAndGet();
-        WHEEL_TOUCH.put(ship.getUniqueId(), new WheelTouch(deck.getUUID().toString(), level.getGameTime()));
+        String deckId = deck.getUUID().toString();
+        lastTouchDeck = deckId;
+        WHEEL_TOUCH.put(ship.getUniqueId(), new WheelTouch(deckId, level.getGameTime()));
     }
 
     /** The held tire's radius, read the way Offroad does. No tire means the wheel does nothing. */
