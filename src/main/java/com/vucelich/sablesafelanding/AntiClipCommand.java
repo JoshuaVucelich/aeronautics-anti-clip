@@ -18,7 +18,14 @@ public final class AntiClipCommand {
     public static void register(RegisterCommandsEvent event) {
         event.getDispatcher().register(
                 Commands.literal("anticlip")
-                        .then(Commands.literal("status").executes(context -> status(context.getSource())))
+                        .then(Commands.literal("status").executes(context -> status(context.getSource()))
+                                .then(Commands.literal("reset")
+                                        .requires(source -> source.hasPermission(2))
+                                        .executes(context -> {
+                                            PerfMeter.reset();
+                                            context.getSource().sendSuccess(() -> Component.literal("Anti-Clip server timers reset"), false);
+                                            return Command.SINGLE_SUCCESS;
+                                        })))
                         .then(Commands.literal("off")
                                 .requires(source -> source.hasPermission(2))
                                 .executes(context -> setEnabled(context.getSource(), false)))
@@ -54,6 +61,30 @@ public final class AntiClipCommand {
                 WheelContactRuntime.budgetSkips()
         );
         source.sendSuccess(() -> Component.literal(text), false);
+        double[] recent = PerfMeter.recentMicros();
+        long[] rescue = VoidRescueRuntime.counts();
+        String timing = String.format(
+                java.util.Locale.ROOT,
+                "Server time: mean %.2f us/tick, worst %d us over %d ticks; last minute mean %.2f us, worst %.0f us; ticks over 20 us %d; deck work ran in %d of %d level-ticks (idleSleep=%s); budget-out ticks %d, steps deferred %d, index builds deferred %d, collider uploads %d (deferred %d); void rescue full steps %d, skipped far from the void %d",
+                PerfMeter.meanMicros(),
+                PerfMeter.worstMicros(),
+                PerfMeter.ticks(),
+                recent[0],
+                recent[1],
+                PerfMeter.busyTicks(),
+                DeckGate.engagedTicks(),
+                DeckGate.checkedTicks(),
+                SafeLandingConfig.idleSleep(),
+                CarryRuntime.budgetExhaustedTicks(),
+                CarryRuntime.budgetDeferred(),
+                DeckShapes.deferredBuilds(),
+                ColliderFeedRuntime.uploads(),
+                ColliderFeedRuntime.deferredUploads(),
+                rescue[1],
+                rescue[0]
+        );
+        source.sendSuccess(() -> Component.literal(timing), false);
+        SableSafeLanding.LOGGER.info("{} | {}", text, timing);
         return Command.SINGLE_SUCCESS;
     }
 

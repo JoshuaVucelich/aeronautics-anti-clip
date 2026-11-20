@@ -94,10 +94,19 @@ public final class CarryRuntime {
     /** The last deck shape built for a contraption, reused when the tick budget runs out. */
     private static final Map<String, List<SupportMotion>> LAST_SHAPES = new HashMap<>();
     private static final Map<String, TickBudget> BUDGETS = new HashMap<>();
+    /** Learned cost of one ship-against-deck block contact test. */
+    private static final com.vucelich.sablesafelanding.sim.CostEstimate TOUCH_COST =
+            new com.vucelich.sablesafelanding.sim.CostEstimate(50_000.0, 1_000.0);
+    /** Cells the last shape build of a deck used, for the next build's cost estimate. */
+    private static final Map<String, Integer> LAST_CELLS = new HashMap<>();
+    /** Learned cost of turning one deck cell into shapes (query, merge, and transform). */
+    private static final com.vucelich.sablesafelanding.sim.CostEstimate MERGE_COST =
+            new com.vucelich.sablesafelanding.sim.CostEstimate(150.0, 5.0, 64);
     private static final Map<String, CachedReaches> REACHES = new HashMap<>();
     private static final Set<String> TRUNCATION_LOGGED = new HashSet<>();
     /** A deck that moved within this many ticks still counts as moving for the deck shapes. */
     private static final long ACTIVE_TICKS = 40;
+    private static final boolean GATE_DEBUG = Boolean.getBoolean("sable_safe_landing.gateDebug");
     /** Most deck blocks turned into shapes for one contraption in one tick. */
     private static final int MAX_REGION_BLOCKS = 16_384;
     /** Most ships looked at for the deck reach test in one tick. */
@@ -238,7 +247,9 @@ public final class CarryRuntime {
                 return;
             }
             boolean lag = CarryGate.lagSpike(event.getTimeStep());
-            List<SupportMotion> supports = lag ? List.of() : supportsFor(level);
+            // Nothing on or next to a moving deck: no deck work at all this tick.
+            boolean engaged = DeckGate.engaged(level);
+            List<SupportMotion> supports = lag || !engaged ? List.of() : supportsFor(level);
             if (lag) {
                 logLag(event.getTimeStep());
             }
@@ -250,9 +261,19 @@ public final class CarryRuntime {
             }
             PhysicsPipeline pipeline = system.getPipeline();
             List<ServerSubLevel> ships = new ArrayList<>();
-            for (ServerSubLevel subLevel : container.getAllSubLevels()) {
-                if (!subLevel.isRemoved()) {
-                    ships.add(subLevel);
+            if (!supports.isEmpty()) {
+                // Only ships that can reach a moving or holding deck can touch its shapes.
+                for (ServerSubLevel subLevel : DeckGate.nearShips(level)) {
+                    if (!subLevel.isRemoved()) {
+                        ships.add(subLevel);
+                    }
+                }
+            } else {
+                // A lag spike with no deck work: only ships near a rescue line can need a rescue.
+                for (ServerSubLevel subLevel : container.getAllSubLevels()) {
+                    if (!subLevel.isRemoved() && VoidRescueRuntime.needsStep(subLevel)) {
+                        ships.add(subLevel);
+                    }
                 }
             }
             VoidRescueRuntime.advanceAll(ships, pipeline, supports, event.getTimeStep());
@@ -301,6 +322,7 @@ public final class CarryRuntime {
         BLOCK_CACHE.clear();
         MOVED_AT.clear();
         LAST_SHAPES.clear();
+        LAST_CELLS.clear();
         BUDGETS.clear();
         REACHES.clear();
         TRUNCATION_LOGGED.clear();
@@ -361,7 +383,14 @@ public final class CarryRuntime {
             prunePassengers(dimension, container);
         }
         String prefix = dimension + "\0";
-        List<DeckBox> decks = deckBoxes(level, dimension);
+        if (!DeckGate.engagedAtEnd(level)) {
+            // Nothing held and no ship near a moving deck. If a ship sits next to a stopped deck,
+            // get that deck's index ready inside the budget so the carry is ready when it moves.
+            if (DeckGate.near(level)) {
+                prebuild(level);
+            }
+            return;
+        }
         List<String> drop = new ArrayList<>();
         for (Map.Entry<String, DeckLock> entry : LOCKS.entrySet()) {
             if (!entry.getKey().startsWith(prefix)) {
@@ -411,12 +440,13 @@ public final class CarryRuntime {
         for (String key : drop) {
             LOCKS.remove(key);
         }
+        List<DeckBox> decks = deckBoxes(level, dimension);
         if (decks.isEmpty()) {
             // No contraption deck in this level: nothing can be captured.
             return;
         }
         List<ServerSubLevel> unlocked = new ArrayList<>();
-        for (ServerSubLevel ship : container.getAllSubLevels()) {
+        for (ServerSubLevel ship : DeckGate.nearShips(level)) {
             if (ship.isRemoved() || ship.getLevel() != level) {
                 continue;
             }
@@ -472,16 +502,36 @@ public final class CarryRuntime {
                         && (deckSample.translation.length() >= CarryGate.IDLE_ANCHOR
                         || Math.abs(deckSample.angleRadians) >= CarryGate.IDLE_ANGLE);
                 if (!deckMoving) {
+                    if (GATE_DEBUG) {
+                        SableSafeLanding.LOGGER.info("GATE still deck {} sample={} t={}", deck.entity.getUUID(),
+                                deckSample == null ? "none" : deckSample.translation + "@" + deckSample.time, level.getGameTime());
+                    }
                     continue;
                 }
                 // Block test is only this contraption. A ship that missed every box never gets here.
-                BlockContact.Touch touch = onWheels
-                        ? new BlockContact.Touch(CarryGate.Contact.RESTING, wheelDeck)
-                        : BlockContact.touch(
-                                ship,
-                                blocksCached(level, dimension, deck.entity),
-                                CarryGate.CAPTURE_GAP
-                        );
+                BlockContact.Touch touch;
+                if (onWheels) {
+                    touch = new BlockContact.Touch(CarryGate.Contact.RESTING, wheelDeck);
+                } else {
+                    // The block test is budgeted too: past the cap it waits for the next tick,
+                    // which only delays a capture by one tick.
+                    TickBudget budget = budget(level);
+                    if (!budget.allowsBulk(TOUCH_COST.estimate(1))) {
+                        budget.defer();
+                        TOUCH_COST.relax();
+                        continue;
+                    }
+                    List<SupportMotion> shapes = blocksCached(level, dimension, deck.entity);
+                    long touchStart = System.nanoTime();
+                    touch = BlockContact.touch(ship, shapes, CarryGate.CAPTURE_GAP);
+                    long touchUsed = System.nanoTime() - touchStart;
+                    budget.charge(touchUsed);
+                    TOUCH_COST.observe(1, touchUsed);
+                }
+                if (GATE_DEBUG) {
+                    SableSafeLanding.LOGGER.info("GATE capture ship {} deck {} contact={} t={}", ship.getUniqueId(),
+                            deck.entity.getUUID(), touch.contact(), level.getGameTime());
+                }
                 if (touch.contact() != CarryGate.Contact.RESTING || touch.supportId() == null) {
                     continue;
                 }
@@ -1084,9 +1134,6 @@ public final class CarryRuntime {
         java.util.Set<String> seen = new java.util.HashSet<>();
         int count = 0;
         for (AbstractContraptionEntity entity : contraptions(level)) {
-            if (!ColliderFeedRuntime.isWorldSupport(entity)) {
-                continue;
-            }
             if (count++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
                 break;
             }
@@ -1116,7 +1163,7 @@ public final class CarryRuntime {
         }
     }
 
-    private static Aabb broadphaseBounds(AbstractContraptionEntity entity) {
+    static Aabb broadphaseBounds(AbstractContraptionEntity entity) {
         net.minecraft.world.phys.AABB box = entity.getBoundingBox();
         if (box == null || box.minX > box.maxX || box.minY > box.maxY || box.minZ > box.maxZ) {
             return null;
@@ -1131,7 +1178,7 @@ public final class CarryRuntime {
         return assembled;
     }
 
-    private static Aabb shipBox(ServerSubLevel ship) {
+    static Aabb shipBox(ServerSubLevel ship) {
         BoundingBox3dc box = ship.boundingBox();
         if (box == null) {
             return null;
@@ -1179,9 +1226,6 @@ public final class CarryRuntime {
         List<SupportMotion> supports = new ArrayList<>();
         int seen = 0;
         for (AbstractContraptionEntity entity : contraptions(level)) {
-            if (!ColliderFeedRuntime.isWorldSupport(entity)) {
-                continue;
-            }
             if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
                 break;
             }
@@ -1202,23 +1246,55 @@ public final class CarryRuntime {
         return supports;
     }
 
+    /** World decks in this level, from the cached list. No per-tick scan of every contraption. */
     private static List<AbstractContraptionEntity> contraptions(ServerLevel level) {
-        List<AbstractContraptionEntity> tracked = ColliderFeedRuntime.tracked(level);
-        if (!tracked.isEmpty()) {
-            return tracked;
+        List<AbstractContraptionEntity> decks = Decks.of(level);
+        List<AbstractContraptionEntity> live = new ArrayList<>(decks.size());
+        for (AbstractContraptionEntity entity : decks) {
+            if (entity != null && !entity.isRemoved() && entity.level() == level) {
+                live.add(entity);
+            }
         }
-        List<AbstractContraptionEntity> scanned = new ArrayList<>();
-        int seen = 0;
-        for (AbstractContraptionEntity entity : LiveContraptions.in(level)) {
-            if (entity == null || entity.isRemoved() || entity.level() != level) {
+        return live;
+    }
+
+    /** Contraption ids the ships held in this dimension stand on. Empty and free when nothing is held. */
+    static Set<String> heldDeckIds(String dimension) {
+        if (LOCKS.isEmpty()) {
+            return Set.of();
+        }
+        String prefix = dimension + "\0";
+        Set<String> ids = null;
+        for (Map.Entry<String, DeckLock> entry : LOCKS.entrySet()) {
+            if (entry.getKey().startsWith(prefix)) {
+                if (ids == null) {
+                    ids = new HashSet<>(2);
+                }
+                ids.add(entry.getValue().contraptionId);
+            }
+        }
+        return ids == null ? Set.of() : ids;
+    }
+
+    /**
+     * A ship is next to a deck that is not moving. Builds that deck's index a budgeted slice at a
+     * time so the carry has it the tick the deck starts. Once every deck near a ship is ready this
+     * is one map read per deck.
+     */
+    private static void prebuild(ServerLevel level) {
+        for (AbstractContraptionEntity entity : contraptions(level)) {
+            if (DeckShapes.ready(entity)) {
                 continue;
             }
-            if (seen++ >= ColliderFeedRuntime.MAX_CONTRAPTIONS) {
-                break;
+            if (nearReaches(level, entity).isEmpty()) {
+                continue;
             }
-            scanned.add(entity);
+            TickBudget budget = budget(level);
+            if (!budget.allows()) {
+                return;
+            }
+            DeckShapes.index(entity, budget);
         }
-        return scanned;
     }
 
     private static List<SupportMotion> forId(List<SupportMotion> supports, String id) {
@@ -1283,16 +1359,32 @@ public final class CarryRuntime {
         // no ship on or next to it has none and costs nothing more.
         List<Aabb> reaches = nearReaches(level, entity);
         if (reaches.isEmpty()) {
+            if (GATE_DEBUG) {
+                SableSafeLanding.LOGGER.info("GATE blocks {} no reaches t={}", id, gameTime);
+            }
             LAST_SHAPES.remove(key);
             return List.of();
         }
         TickBudget budget = budget(level);
         List<SupportMotion> last = LAST_SHAPES.getOrDefault(key, List.of());
         if (!budget.allows()) {
+            if (GATE_DEBUG) {
+                SableSafeLanding.LOGGER.info("GATE blocks {} no budget spent={} cap={} t={}", id, budget.spentNanos(), budget.capNanos(), gameTime);
+            }
             return last;
         }
         DeckIndex index = DeckShapes.index(entity, budget);
-        if (index == null || !budget.allows()) {
+        if (index == null) {
+            if (GATE_DEBUG) {
+                SableSafeLanding.LOGGER.info("GATE blocks {} no index t={}", id, gameTime);
+            }
+            return last;
+        }
+        // The shapes for this deck are only started when their expected cost fits what is left.
+        int expectCells = LAST_CELLS.getOrDefault(key, 256);
+        if (!budget.allowsBulk(MERGE_COST.estimate(Math.max(1, expectCells)))) {
+            budget.defer();
+            MERGE_COST.relax();
             return last;
         }
         long start = System.nanoTime();
@@ -1336,7 +1428,10 @@ public final class CarryRuntime {
             Aabb world = Aabb.enclosing(corners(entity, box, anchorNow, 1.0f));
             supports.add(new SupportMotion(id, world, sample.translation, pivot, sample.axis, sample.angleRadians));
         }
-        budget.charge(System.nanoTime() - start);
+        long used = System.nanoTime() - start;
+        budget.charge(used);
+        MERGE_COST.observe(Math.max(1, count), used);
+        LAST_CELLS.put(key, count);
         LAST_SHAPES.put(key, supports);
         return supports;
     }
@@ -1360,14 +1455,16 @@ public final class CarryRuntime {
         Vec3 translation = Vec3.ZERO;
         double radians = 0.0;
         Vec3 axis = new Vec3(0.0, 1.0, 0.0);
-        if (previous != null && previous.time < gameTime) {
-            Vec3 raw = new Vec3(anchor.x - previous.x, anchor.y - previous.y, anchor.z - previous.z);
+        long gap = previous == null ? 0L : gameTime - previous.time;
+        if (previous != null && gap >= 1L && gap <= 3L) {
+            // A sample missed while the level was idle covers more than one tick: spread it.
+            Vec3 raw = new Vec3(anchor.x - previous.x, anchor.y - previous.y, anchor.z - previous.z).mul(1.0 / gap);
             if (raw.length() <= AntiClipStep.MAX_RIDE_STEP) {
                 translation = raw;
             }
             if (entity instanceof ControlledContraptionEntity controlled && controlled.getRotationAxis() != null) {
                 axis = axis(controlled.getRotationAxis());
-                float degrees = Mth.wrapDegrees(angleNow - previous.angle);
+                float degrees = Mth.wrapDegrees(angleNow - previous.angle) / gap;
                 if (Math.abs(degrees) <= AntiClipStep.MAX_RIDE_DEGREES) {
                     radians = Math.toRadians(degrees);
                 }
@@ -1386,6 +1483,19 @@ public final class CarryRuntime {
         Sample sample = new Sample(gameTime, anchor.x, anchor.y, anchor.z, angleNow, translation, radians, axis);
         SAMPLES.put(key, sample);
         return sample;
+    }
+
+    /**
+     * Stores a deck pose as its sample for {@code time}, unless the carry already has one that
+     * new. Used by {@link DeckGate} when a deck starts moving while the level was idle.
+     */
+    static void seedSample(String dimension, AbstractContraptionEntity entity, double x, double y, double z, float angle, long time) {
+        String key = dimension + "\0" + entity.getUUID();
+        Sample previous = SAMPLES.get(key);
+        if (previous != null && previous.time >= time) {
+            return;
+        }
+        SAMPLES.put(key, new Sample(time, x, y, z, angle, Vec3.ZERO, 0.0, new Vec3(0.0, 1.0, 0.0)));
     }
 
     /**
@@ -1461,7 +1571,7 @@ public final class CarryRuntime {
         return boxes;
     }
 
-    private static TickBudget budget(ServerLevel level) {
+    public static TickBudget budget(ServerLevel level) {
         TickBudget budget = BUDGETS.computeIfAbsent(level.dimension().location().toString(), ignored -> new TickBudget());
         // Keyed by the server tick, so the physics hook and the end-of-tick hook share one allowance.
         budget.begin(level.getServer().getTickCount(), SafeLandingConfig.tickBudgetMicros());
@@ -1472,6 +1582,15 @@ public final class CarryRuntime {
     public static long budgetSpentNanos(String dimension) {
         TickBudget budget = BUDGETS.get(dimension);
         return budget == null ? 0L : budget.spentNanos();
+    }
+
+    /** Steps put off to a later tick because they did not fit the budget, all dimensions. */
+    public static long budgetDeferred() {
+        long total = 0;
+        for (TickBudget budget : BUDGETS.values()) {
+            total += budget.deferredSteps();
+        }
+        return total;
     }
 
     /** Ticks in which deck shape work ran out of budget, all dimensions. */
