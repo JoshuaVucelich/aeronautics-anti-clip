@@ -5,6 +5,7 @@ import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import com.vucelich.sablesafelanding.sim.AntiClipStep;
 import com.vucelich.sablesafelanding.sim.BodyState;
 import com.vucelich.sablesafelanding.sim.RateLimiter;
+import com.vucelich.sablesafelanding.sim.ParkedPose;
 import com.vucelich.sablesafelanding.sim.PoseSnapshot;
 import com.vucelich.sablesafelanding.sim.RescueBounds;
 import com.vucelich.sablesafelanding.sim.RescueSite;
@@ -55,6 +56,21 @@ public final class VoidRescueRuntime {
     private static final java.util.Map<String, Long> PASSED_AT = new java.util.HashMap<>();
     private static long skipped;
     private static long stepped;
+    private static long parkedSnaps;
+    /**
+     * Ticks between cheap safe-pose snapshots of a ship far from every rescue line. A ship is
+     * snapshotted the first tick it is seen, then every this many ticks, so ships loaded at
+     * different times are naturally staggered.
+     */
+    static final long PARKED_STRIDE = 10;
+    /**
+     * Per ship: the last safe pose seen while it was outside every rescue band. Layout:
+     * {time, x, y, z, minX, minY, minZ, maxX, maxY, maxZ, qx, qy, qz, qw, valid}. One array per
+     * ship, filled in place, so a snapshot allocates nothing. When the ship enters a band this
+     * seeds the rescue tracker, so a ship that was resting far from the void and then clips
+     * through bedrock still has a pose to go back to.
+     */
+    private static final Map<ServerSubLevel, double[]> PARKED = new java.util.IdentityHashMap<>();
 
     /** Ship ticks skipped because the ship was far from every rescue line, and ones that ran the full step. */
     public static long[] counts() {
@@ -88,7 +104,8 @@ public final class VoidRescueRuntime {
                         config
                 );
                 double bedrock = config.bedrockRescue() ? level.getMinBuildHeight() - config.bedrockMargin() : Double.NaN;
-                band = new double[]{time, world.floor() + config.safeClearance(), world.ceiling() - config.safeClearance(), bedrock};
+                band = new double[]{time, world.floor() + config.safeClearance(), world.ceiling() - config.safeClearance(), bedrock,
+                        level.getMinBuildHeight(), config.stableFallSpeed()};
                 BANDS.put(dimension, band);
             }
             BoundingBox3dc box = subLevel.boundingBox();
@@ -100,11 +117,46 @@ public final class VoidRescueRuntime {
                 stepped++;
             } else {
                 skipped++;
+                if (box != null) {
+                    parkedSnapshot(subLevel, box, vy, time, band[4], band[5]);
+                }
             }
             return in;
         } catch (RuntimeException ex) {
             return true;
         }
+    }
+
+    /**
+     * Records the ship's pose in place, at most once every {@link #PARKED_STRIDE} ticks, when it
+     * would pass the tracker's own safe test: finite, not below min build height, and not
+     * falling faster than {@code stableFallSpeed}. Penetration into a deck is not checked here
+     * (that needs the deck shapes); the full step checks it again inside the band.
+     */
+    private static void parkedSnapshot(ServerSubLevel subLevel, BoundingBox3dc box, double vy, long time,
+                                       double minBuild, double stableFallSpeed) {
+        double[] parked = PARKED.get(subLevel);
+        if (parked == null) {
+            parked = ParkedPose.fresh();
+            PARKED.put(subLevel, parked);
+        } else if (!ParkedPose.due(parked, time, PARKED_STRIDE)) {
+            return;
+        }
+        Vector3dc position = subLevel.logicalPose().position();
+        if (!ParkedPose.eligible(position.x(), position.y(), position.z(), box.minY(), box.maxY(), vy,
+                minBuild, stableFallSpeed)) {
+            return;
+        }
+        Quaterniondc orientation = subLevel.logicalPose().orientation();
+        ParkedPose.write(parked, time, position.x(), position.y(), position.z(),
+                box.minX(), box.minY(), box.minZ(), box.maxX(), box.maxY(), box.maxZ(),
+                orientation.x(), orientation.y(), orientation.z(), orientation.w());
+        parkedSnaps++;
+    }
+
+    /** The parked pose of this ship when it is newer than what the tracker holds, else null. */
+    private static PoseSnapshot parkedNewerThan(ServerSubLevel subLevel, PoseSnapshot current) {
+        return ParkedPose.newerThan(PARKED.get(subLevel), current);
     }
 
     /**
@@ -120,10 +172,18 @@ public final class VoidRescueRuntime {
 
     public static void clear() {
         STEP.clear();
+        PARKED.clear();
     }
 
     public static void forgetDimension(String dimension) {
         STEP.forgetDimension(dimension);
+        PARKED.keySet().removeIf(ship -> ship.isRemoved()
+                || dimension.equals(ship.getLevel().dimension().location().toString()));
+    }
+
+    /** Cheap safe-pose snapshots taken outside the bands since startup. */
+    public static long parkedSnaps() {
+        return parkedSnaps;
     }
 
     private VoidRescueRuntime() {
@@ -189,6 +249,7 @@ public final class VoidRescueRuntime {
                     "Sable removal hook has not run; void rescue will not see the post-bounds check. Leaving deletion to Sable when the hook is absent"
             );
         }
+        PARKED.keySet().removeIf(ServerSubLevel::isRemoved);
         try {
             STEP.retainDimension(system.getLevel().dimension().location().toString(), live);
         } catch (RuntimeException ex) {
@@ -220,6 +281,14 @@ public final class VoidRescueRuntime {
                 PoseSnapshot stored = saved.recall(id);
                 if (stored != null) {
                     STEP.tracker().put(dimension, id, stored);
+                }
+            }
+            // A ship that was resting far from every rescue line only has its cheap parked pose.
+            PoseSnapshot parked = parkedNewerThan(subLevel, STEP.tracker().get(dimension, id));
+            if (parked != null) {
+                STEP.tracker().put(dimension, id, parked);
+                if (saved != null) {
+                    saved.remember(id, parked);
                 }
             }
             BoundingBox3dc box = subLevel.boundingBox();

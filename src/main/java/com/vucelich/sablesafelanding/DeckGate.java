@@ -46,6 +46,8 @@ public final class DeckGate {
         private final Map<AbstractContraptionEntity, double[]> last = new IdentityHashMap<>();
         private int version = Integer.MIN_VALUE;
         private boolean wasEngaged;
+        /** Latest tick any deck in this level was seen moving. */
+        private long lastMove = Long.MIN_VALUE / 2;
     }
 
     private static final Map<String, State> STATES = new java.util.HashMap<>();
@@ -92,6 +94,19 @@ public final class DeckGate {
             }
         }
         return false;
+    }
+
+    /**
+     * Latest server tick any deck in this level was seen moving, or a very old tick. A deck that
+     * joins or leaves bumps {@link LiveContraptions#version()} instead.
+     */
+    public static long lastDeckMove(ServerLevel level) {
+        return update(level).lastMove;
+    }
+
+    /** Server tick count the gate uses. */
+    public static long tickOf(ServerLevel level) {
+        return level.getServer().getTickCount();
     }
 
     /** Some ship is on or next to some deck, moving or not. Refreshed every {@link #NEAR_STRIDE} ticks. */
@@ -165,6 +180,7 @@ public final class DeckGate {
             double dz = anchor.z - last[2];
             if (dx * dx + dy * dy + dz * dz > 1.0e-8 || Math.abs(angle - last[3]) > 1.0e-3) {
                 last[4] = tick;
+                state.lastMove = tick;
             }
             last[0] = anchor.x;
             last[1] = anchor.y;
@@ -255,6 +271,36 @@ public final class DeckGate {
             }
         }
         return found == null ? List.of() : found;
+    }
+
+    /**
+     * True when some ship's box, grown by {@code margin} plus {@code seconds} of its own speed,
+     * overlaps {@code box}. Box tests only. Used to put off the collider takeover of a deck no
+     * ship is anywhere near.
+     */
+    public static boolean anyShipWithin(ServerLevel level, Aabb box, double margin, double seconds) {
+        if (box == null || !(SubLevelContainer.getContainer(level) instanceof ServerSubLevelContainer container)) {
+            return true;
+        }
+        int seen = 0;
+        for (ServerSubLevel ship : container.getAllSubLevels()) {
+            if (seen++ >= MAX_SHIPS) {
+                return true;
+            }
+            if (ship.isRemoved() || ship.getLevel() != level) {
+                continue;
+            }
+            Aabb hull = CarryRuntime.shipBox(ship);
+            if (hull == null) {
+                return true;
+            }
+            Vector3d velocity = ship.latestLinearVelocity;
+            double speed = velocity == null || !Double.isFinite(velocity.length()) ? 0.0 : velocity.length();
+            if (hull.expand(margin + Math.min(256.0, speed * seconds)).intersects(box)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<ServerSubLevel> allShips(ServerLevel level) {
