@@ -36,6 +36,13 @@ public final class StressTrial {
     private static final int LAYERS = Integer.getInteger("sable_safe_landing.stress.layers", 6);
     private static final int RPM = Integer.getInteger("sable_safe_landing.stress.rpm", 64);
     private static final boolean MOD_OFF = Boolean.getBoolean("sable_safe_landing.stress.modOff");
+    private static final int COUNT = Integer.getInteger("sable_safe_landing.stress.count", 0);
+    private static final int SMALL_HALF = Integer.getInteger("sable_safe_landing.stress.smallHalf", 8);
+    private static final int SHIPS = Integer.getInteger("sable_safe_landing.stress.ships", 0);
+    private static final int CHURN = Integer.getInteger("sable_safe_landing.stress.churn", 0);
+    private static final int SPACING = 24;
+    private static final boolean RELOAD = Boolean.getBoolean("sable_safe_landing.stress.reload");
+    private static final List<BlockEntity> SMALL = new ArrayList<>();
     private static final long WALL_LIMIT_NANOS = Long.getLong("sable_safe_landing.stress.wallSeconds", 1500L) * 1_000_000_000L;
 
     private static final int IDLE_STILL = 40;
@@ -84,7 +91,7 @@ public final class StressTrial {
         if (!ENABLED || done) {
             return;
         }
-        long used = PerfMeter.takeTick();
+        long used = PerfMeter.lastTickNanos();
         long tickNanos = System.nanoTime() - tickStart;
         MinecraftServer server = event.getServer();
         if (wallStart == 0L) {
@@ -106,7 +113,7 @@ public final class StressTrial {
                         CarryRuntime.budgetSpentNanos("minecraft:overworld") / 1_000L, split);
             }
             partsLastTick = parts;
-            if (tickNanos > 1_000_000_000L) {
+            if (tickNanos > 50_000_000L && !phase.equals("setup")) {
                 log("slow tick {} phase={} ms={}", tick, phase, tickNanos / 1_000_000L);
             }
             if (System.nanoTime() - wallStart > WALL_LIMIT_NANOS) {
@@ -130,29 +137,52 @@ public final class StressTrial {
             SafeLandingConfig.CARRY.set(true);
             SafeLandingConfig.WHEEL_CONTACT.set(true);
             int reach = (HALF + 90) >> 4;
-            for (int cx = -reach; cx <= reach; cx++) {
-                for (int cz = -((HALF >> 4) + 2); cz <= (HALF >> 4) + 2; cz++) {
+            int far = COUNT > 0 || SHIPS > 0 ? (HALF + 100 + 8 * SPACING + 16) >> 4 : reach;
+            int zr = COUNT > 0 || SHIPS > 0 ? Math.max((HALF >> 4) + 2, 7) : (HALF >> 4) + 2;
+            for (int cx = -reach; cx <= far; cx++) {
+                for (int cz = -zr; cz <= zr; cz++) {
                     level.setChunkForced(cx, cz, true);
                     level.getChunk(cx, cz);
                 }
             }
             surface = level.getHeight(Heightmap.Types.MOTION_BLOCKING, 0, 0);
             base = new BlockPos(0, surface + 30, 0);
-            log("surface y {} modOff={} half={} layers={} rpm={}", surface, MOD_OFF, HALF, LAYERS, RPM);
+            log("surface y {} modOff={} half={} layers={} rpm={} count={} ships={} churn={} reload={}",
+                    surface, MOD_OFF, HALF, LAYERS, RPM, COUNT, SHIPS, CHURN, RELOAD);
+            if (RELOAD) {
+                startPhase("reload");
+            }
             return;
         }
         if (tick < 0) {
             return;
         }
+        if (RELOAD) {
+            if (tick == 0) {
+                log("reload contraptions live={} decks={}", LiveContraptions.in(level).size(), Decks.of(level).size());
+            }
+            if (tick == 1300) {
+                endPhase();
+                log("RESULT reload live={} uploads={} deferredUploads={}", LiveContraptions.in(level).size(),
+                        ColliderFeedRuntime.uploads(), ColliderFeedRuntime.deferredUploads());
+                log("RESULT mod overall meanUs={} worstUs={}", String.format(java.util.Locale.ROOT, "%.1f", PerfMeter.meanMicros()), PerfMeter.worstMicros());
+                finish(level.getServer());
+            }
+            return;
+        }
         if (tick == 0) {
             build(level);
+            buildSmall(level);
         } else if (tick == 12) {
+            startPhase("assembly");
             try {
                 LiveTrial.invoke(controller, "assemble");
             } catch (ReflectiveOperationException ex) {
                 log("assemble failed {}", LiveTrial.causeText(ex));
             }
             contraption = LiveTrial.attached(controller);
+            long smallBlocks = assembleSmall();
+            log("small contraptions={} blocks={} live={}", SMALL.size(), smallBlocks, LiveContraptions.in(level).size());
             int blocks = contraption == null || contraption.getContraption() == null ? 0 : contraption.getContraption().getBlocks().size();
             log("contraption alive={} blocks={}", contraption != null && contraption.isAlive(), blocks);
         } else if (tick == 20) {
@@ -163,16 +193,28 @@ public final class StressTrial {
                 }
             }
             parked = WheelTrial.assembleHeavy(level, pad.offset(0, 4, 0));
+            for (int k = 0; k < SHIPS; k++) {
+                BlockPos p2 = new BlockPos(HALF + 60, surface, -90 + k * 12);
+                for (int x = -4; x <= 4; x++) {
+                    for (int z = -5; z <= 5; z++) {
+                        level.setBlockAndUpdate(p2.offset(x, 1, z), Blocks.STONE.defaultBlockState());
+                    }
+                }
+                WheelTrial.assembleHeavy(level, p2.offset(0, 4, 0));
+            }
+            log("extra parked ships {}", SHIPS);
             player = FakePlayerFactory.getMinecraft(level);
             player.setPos(base.getX() + HALF - 1.5, base.getY() + LAYERS + 1.0, base.getZ() + 0.5);
             log("parked ship {} fake player on deck at {}", parked == null ? "none" : parked.getUniqueId(), player.position());
         }
         if (tick == IDLE_STILL) {
+            endPhase();
             startPhase("idle-still");
         } else if (tick == IDLE_MOVING) {
             endPhase();
             startPhase("idle-moving");
             callElevator(3);
+            callSmall(3);
         } else if (tick == DROP) {
             endPhase();
             startPhase("settle");
@@ -190,6 +232,32 @@ public final class StressTrial {
             trackRide();
         } else if (tick == END) {
             endPhase();
+            if (CHURN > 0) {
+                startPhase("churn");
+            }
+        } else if (CHURN > 0 && tick > END && tick < END + CHURN * 60) {
+            // Every 60 ticks each small deck disassembles, reassembles a tick later, and is sent
+            // on a trip, the way an elevator that lands at every floor would.
+            int at = (tick - END) % 60;
+            if (at == 1) {
+                for (BlockEntity be : SMALL) {
+                    try {
+                        LiveTrial.invoke(be, "disassemble");
+                    } catch (ReflectiveOperationException ex) {
+                        log("small disassemble failed {}", LiveTrial.causeText(ex));
+                    }
+                }
+            } else if (at == 3) {
+                assembleSmall();
+            } else if (at == 6) {
+                callSmall(((tick - END) / 60) % 2 == 0 ? -1 : 1);
+            }
+        } else if (tick == END + Math.max(0, CHURN) * 60 || (CHURN <= 0 && tick == END + 1)) {
+            if (CHURN > 0) {
+                endPhase();
+                log("RESULT churn cycles={} uploads={} deferredUploads={} indexDeferred={}", CHURN,
+                        ColliderFeedRuntime.uploads(), ColliderFeedRuntime.deferredUploads(), DeckShapes.deferredBuilds());
+            }
             log("RESULT ride settledGap={} minGap={} maxGap={} maxLag={} heldTicks={} heldDrops={} deckMoved={} riderRemoved={}",
                     LiveTrial.fmt(settledGap), LiveTrial.fmt(rideMinGap), LiveTrial.fmt(rideMaxGap), LiveTrial.fmt(rideMaxLag),
                     heldTicks, drops, LiveTrial.fmt(deckY() - anchorAtRide), rider == null || rider.isRemoved());
@@ -233,6 +301,60 @@ public final class StressTrial {
                 new net.minecraft.world.phys.AABB(lo.getX(), lo.getY(), lo.getZ(), lo.getX() + size, lo.getY() + LAYERS, lo.getZ() + size)));
         controller = WheelTrial.elevatorAt(level, base.offset(0, LAYERS, 0), RPM);
         log("built {} blocks", placed);
+    }
+
+    private static void buildSmall(ServerLevel level) {
+        long placed = 0;
+        for (int i = 0; i < COUNT; i++) {
+            BlockPos b = new BlockPos(HALF + 100 + (i % 8) * SPACING, base.getY(), -84 + (i / 8) * SPACING);
+            for (int x = -SMALL_HALF; x <= SMALL_HALF; x++) {
+                for (int z = -SMALL_HALF; z <= SMALL_HALF; z++) {
+                    level.setBlock(b.offset(x, LAYERS, z), Blocks.OAK_PLANKS.defaultBlockState(), 2);
+                    placed++;
+                    int hash = (x * 73856093) ^ (z * 19349663);
+                    hash ^= hash >>> 13;
+                    int hang = Math.floorMod(hash, LAYERS);
+                    for (int y = LAYERS - hang; y < LAYERS; y++) {
+                        level.setBlock(b.offset(x, y, z), Blocks.STONE.defaultBlockState(), 2);
+                        placed++;
+                    }
+                }
+            }
+            LiveTrial.place(level, b.offset(0, LAYERS, 0), "create:redstone_contact", Direction.SOUTH);
+            BlockPos lo = b.offset(-SMALL_HALF, 1, -SMALL_HALF);
+            int size = SMALL_HALF * 2 + 1;
+            level.addFreshEntity(new com.simibubi.create.content.contraptions.glue.SuperGlueEntity(level,
+                    new net.minecraft.world.phys.AABB(lo.getX(), lo.getY(), lo.getZ(), lo.getX() + size, lo.getY() + LAYERS, lo.getZ() + size)));
+            SMALL.add(WheelTrial.elevatorAt(level, b.offset(0, LAYERS, 0), RPM));
+        }
+        log("built small {} blocks in {}", placed, COUNT);
+    }
+
+    private static long assembleSmall() {
+        long blocks = 0;
+        for (BlockEntity be : SMALL) {
+            try {
+                LiveTrial.invoke(be, "assemble");
+            } catch (ReflectiveOperationException ex) {
+                log("small assemble failed {}", LiveTrial.causeText(ex));
+            }
+            AbstractContraptionEntity e = LiveTrial.attached(be);
+            if (e != null && e.getContraption() != null) {
+                blocks += e.getContraption().getBlocks().size();
+            }
+        }
+        return blocks;
+    }
+
+    private static void callSmall(int steps) {
+        BlockEntity main = controller;
+        double anchor = anchorAtRide;
+        for (BlockEntity be : SMALL) {
+            controller = be;
+            callElevator(steps);
+        }
+        controller = main;
+        anchorAtRide = anchor;
     }
 
     private static void callElevator(int steps) {

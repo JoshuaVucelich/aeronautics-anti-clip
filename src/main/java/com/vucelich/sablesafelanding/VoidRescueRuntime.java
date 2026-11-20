@@ -49,6 +49,63 @@ public final class VoidRescueRuntime {
     private static boolean removalHookSeen;
     private static boolean loggedThread;
     private static int ticksWithShipsBeforeHook;
+    /** Per dimension: {game time, safe floor, safe ceiling, bedrock line or NaN}. Rebuilt once per tick. */
+    private static final java.util.Map<String, double[]> BANDS = new java.util.HashMap<>();
+    /** Per dimension: game time of the last full pre-physics pass. */
+    private static final java.util.Map<String, Long> PASSED_AT = new java.util.HashMap<>();
+    private static long skipped;
+    private static long stepped;
+
+    /** Ship ticks skipped because the ship was far from every rescue line, and ones that ran the full step. */
+    public static long[] counts() {
+        return new long[]{skipped, stepped};
+    }
+
+    public static void forgetBand(String dimension) {
+        BANDS.remove(dimension);
+        PASSED_AT.remove(dimension);
+    }
+
+    /**
+     * False when this ship is far enough from every rescue line that the full rescue step cannot
+     * do anything for it this tick. A few field reads. With idleSleep off it is always true.
+     */
+    public static boolean needsStep(ServerSubLevel subLevel) {
+        if (!SafeLandingConfig.idleSleep()) {
+            return true;
+        }
+        try {
+            ServerLevel level = (ServerLevel) subLevel.getLevel();
+            String dimension = level.dimension().location().toString();
+            long time = level.getGameTime();
+            double[] band = BANDS.get(dimension);
+            if (band == null || (long) band[0] != time) {
+                AntiClipConfig config = SafeLandingConfig.snapshot();
+                RescueBounds world = RescueBounds.of(
+                        level.getMinBuildHeight(),
+                        SableConfig.SUB_LEVEL_REMOVE_MIN.getAsDouble(),
+                        SableConfig.SUB_LEVEL_REMOVE_MAX.getAsDouble(),
+                        config
+                );
+                double bedrock = config.bedrockRescue() ? level.getMinBuildHeight() - config.bedrockMargin() : Double.NaN;
+                band = new double[]{time, world.floor() + config.safeClearance(), world.ceiling() - config.safeClearance(), bedrock};
+                BANDS.put(dimension, band);
+            }
+            BoundingBox3dc box = subLevel.boundingBox();
+            Vector3d velocity = subLevel.latestLinearVelocity;
+            double vy = velocity == null ? 0.0 : velocity.y;
+            boolean in = box == null || com.vucelich.sablesafelanding.sim.RescueBand.inBand(
+                    box.minY(), box.maxY(), vy, band[1], band[2], band[3]);
+            if (in) {
+                stepped++;
+            } else {
+                skipped++;
+            }
+            return in;
+        } catch (RuntimeException ex) {
+            return true;
+        }
+    }
 
     /**
      * Set from the removal mixin once Sable's bounding-box invoke was matched.
@@ -102,13 +159,30 @@ public final class VoidRescueRuntime {
             return;
         }
         PhysicsPipeline pipeline = system.getPipeline();
-        Set<String> live = new HashSet<>();
+        String passDimension = system.getLevel().dimension().location().toString();
+        long passTime = system.getLevel().getGameTime();
+        // Pruning state for removed ships is only needed now and then.
+        boolean prune = passTime % 100L == 0L && !Long.valueOf(passTime).equals(PASSED_AT.get(passDimension));
+        PASSED_AT.put(passDimension, passTime);
+        Set<String> live = prune ? new HashSet<>() : null;
         for (ServerSubLevel subLevel : server.getAllSubLevels()) {
             if (subLevel.isRemoved()) {
                 continue;
             }
-            live.add(subLevel.getUniqueId().toString());
-            consider(subLevel, pipeline);
+            if (live != null) {
+                live.add(subLevel.getUniqueId().toString());
+            }
+            if (!removalHookSeen || needsStep(subLevel)) {
+                consider(subLevel, pipeline);
+            }
+        }
+        if (live == null) {
+            if (!removalHookSeen && server.getAllSubLevels().iterator().hasNext() && ++ticksWithShipsBeforeHook == 40) {
+                SableSafeLanding.LOGGER.warn(
+                        "Sable removal hook has not run; void rescue will not see the post-bounds check. Leaving deletion to Sable when the hook is absent"
+                );
+            }
+            return;
         }
         if (!removalHookSeen && !live.isEmpty() && ++ticksWithShipsBeforeHook == 40) {
             SableSafeLanding.LOGGER.warn(

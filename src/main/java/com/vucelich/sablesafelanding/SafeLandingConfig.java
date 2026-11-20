@@ -6,7 +6,7 @@ import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public final class SafeLandingConfig {
-    public static final String VERSION = "0.7.0-rc.8";
+    public static final String VERSION = "0.7.0-rc.9";
 
     public static final ModConfigSpec SPEC;
     public static final ModConfigSpec.BooleanValue VOID_RESCUE;
@@ -25,6 +25,8 @@ public final class SafeLandingConfig {
     public static final ModConfigSpec.BooleanValue ENABLED;
     public static final ModConfigSpec.BooleanValue WHEEL_CONTACT;
     public static final ModConfigSpec.IntValue TICK_BUDGET_MICROS;
+    public static final ModConfigSpec.BooleanValue IDLE_SLEEP;
+    public static final ModConfigSpec.BooleanValue CLIENT_WHEEL_CONTACT;
     /** Default for {@link #TICK_BUDGET_MICROS}: 2 ms, 4% of a 50 ms tick. */
     public static final int DEFAULT_TICK_BUDGET_MICROS = 2_000;
 
@@ -76,8 +78,14 @@ public final class SafeLandingConfig {
                 .comment("On by default. Lets Aeronautics wheel mounts find the ground on a moving elevator, bearing, piston, or gantry deck, so a car can drive on and off. Off leaves the wheel ground ray exactly as Offroad casts it. Needed on the server for driving and on the client for where the wheels are drawn. Not synced: the server value decides driving and carry, the client value only changes where its wheels are drawn. A wheel far from every contraption deck gets Offroad's ray unchanged, after two map reads.")
                 .define("wheelContact", true);
         TICK_BUDGET_MICROS = builder
-                .comment("Performance. Hard cap, in microseconds per game tick per dimension, on deck work: building a contraption's deck index, the carry's deck shapes, and wheel rays against decks each get this much. The work only runs while a ship is on or next to an elevator or other contraption deck; with nothing on a deck it does nothing. When the cap runs out the rest waits for the next tick: the carry reuses the last deck shape and wheel rays fall back to Offroad's own ray, so it never stalls the server. Default 2000 (2 ms). 0 turns deck work off.")
+                .comment("Performance. Hard cap, in microseconds per game tick per dimension, shared by all deck work: building a contraption's deck index, the carry's deck shapes, and wheel rays against decks. Each step is checked against what is left before it starts, using the step's measured cost, so a step that would not fit waits for the next tick instead of running over. The carry reuses the last deck shape meanwhile and wheel rays use Offroad's own ray. Default 2000 (2 ms). 0 turns deck work off. Any value from 1 to 499 is raised to 500, the smallest cap that keeps a heavy ship riding at the deck's speed; below about 1000 a big deck can lag a ship a little on its first trip.")
                 .defineInRange("tickBudgetMicros", DEFAULT_TICK_BUDGET_MICROS, 0, 50_000);
+        IDLE_SLEEP = builder
+                .comment("Performance, on by default. While no ship is on or next to a moving elevator, bearing, piston, or gantry deck, the carry, deck shapes, and sweep do no work at all, ships are not scanned, and void rescue only reads each ship's height. Off runs the deck checks every tick like 0.7.0-rc.8 did. This never changes how a ship that is actually riding is carried.")
+                .define("idleSleep", true);
+        CLIENT_WHEEL_CONTACT = builder
+                .comment("Client only, on by default. Draws a wheel standing on a contraption deck at the deck instead of sunk through it. Costs nothing while the car is not near a deck. Off leaves the drawn wheel exactly as Offroad places it; driving is decided by the server either way.")
+                .define("clientWheelContact", true);
         CONFIG_VERSION = builder
                 .comment("Internal. 0 means this file was written before carry defaulted on. Loading migrates that file to carry=true and stores 1. A later edit that turns carry off is kept.")
                 .defineInRange("configVersion", 0, 0, 1_000);
@@ -137,6 +145,24 @@ public final class SafeLandingConfig {
             return TICK_BUDGET_MICROS.getAsInt();
         } catch (RuntimeException ex) {
             return DEFAULT_TICK_BUDGET_MICROS;
+        }
+    }
+
+    /** True unless the idle gate is turned off. A config that is not loaded yet counts as on. */
+    public static boolean idleSleep() {
+        try {
+            return IDLE_SLEEP.getAsBoolean();
+        } catch (RuntimeException ex) {
+            return true;
+        }
+    }
+
+    /** Client wheel drawing on decks. A config that is not loaded yet counts as on. */
+    public static boolean clientWheelContact() {
+        try {
+            return CLIENT_WHEEL_CONTACT.getAsBoolean();
+        } catch (RuntimeException ex) {
+            return true;
         }
     }
 

@@ -86,6 +86,13 @@ public final class WheelContactRuntime {
     /** A ground ray longer than this is not a suspension ray; it is left as Offroad cast it. */
     private static final double MAX_RAY = 32.0;
     private static final AtomicLong BUDGET_SKIPS = new AtomicLong();
+    private static final AtomicLong SERVER_DECK_CALLS = new AtomicLong();
+    private static final AtomicLong SERVER_DECK_NANOS = new AtomicLong();
+    /** Learned cost of one wheel ray against one nearby deck. Shared by both sides; each side only reads its own effect. */
+    private static final com.vucelich.sablesafelanding.sim.CostEstimate RAY_COST =
+            new com.vucelich.sablesafelanding.sim.CostEstimate(20_000.0, 500.0);
+    private static final com.vucelich.sablesafelanding.sim.CostEstimate CLIENT_RAY_COST =
+            new com.vucelich.sablesafelanding.sim.CostEstimate(20_000.0, 500.0);
 
     private static volatile Method heldItem;
     private static volatile Method radiusAccessor;
@@ -141,6 +148,15 @@ public final class WheelContactRuntime {
     }
 
     /** Wheel deck rays left to Offroad because the tick budget ran out. Shown by /anticlip status. */
+    /** Ground rays that went through the deck test on the server, and their total time. */
+    public static long serverDeckCalls() {
+        return SERVER_DECK_CALLS.get();
+    }
+
+    public static long serverDeckNanos() {
+        return SERVER_DECK_NANOS.get();
+    }
+
     public static long budgetSkips() {
         return BUDGET_SKIPS.get();
     }
@@ -176,8 +192,55 @@ public final class WheelContactRuntime {
         if (level == null || context == null) {
             return base;
         }
-        Set<AbstractContraptionEntity> live = LiveContraptions.in(level);
-        if (!WheelContact.scan(SafeLandingConfig.running(), switchOn(), live.size())) {
+        if (!level.isClientSide()) {
+            return serverRay(level, context, base, wheelMount);
+        }
+        long start = System.nanoTime();
+        try {
+            if (!SafeLandingConfig.clientWheelContact() || !SafeLandingConfig.running() || !switchOn()) {
+                return base;
+            }
+            return deckRay(level, context, base, wheelMount, null);
+        } finally {
+            ClientPerf.add(level.getGameTime(), System.nanoTime() - start);
+        }
+    }
+
+    private static final boolean WHEEL_DEBUG = Boolean.getBoolean("sable_safe_landing.gateDebug");
+
+    private static BlockHitResult serverRay(Level level, ClipContext context, BlockHitResult base, Object wheelMount) {
+        if (!SafeLandingConfig.running() || !switchOn()) {
+            return base;
+        }
+        if (!(level instanceof net.minecraft.server.level.ServerLevel server)) {
+            return base;
+        }
+        // No ship near any deck in this level: Offroad's own ray, after one cached check.
+        if (Decks.of(level).isEmpty() || !DeckGate.near(server)) {
+            if (WHEEL_DEBUG && level.getGameTime() % 20 == 0) {
+                SableSafeLanding.LOGGER.info("GATE wheel skip decks={} near={} live={} t={}", Decks.of(level).size(),
+                        DeckGate.near(server), LiveContraptions.in(level).size(), level.getGameTime());
+            }
+            return base;
+        }
+        long start = System.nanoTime();
+        try {
+            return deckRay(level, context, base, wheelMount, CarryRuntime.budget(server));
+        } finally {
+            long used = System.nanoTime() - start;
+            PerfMeter.add(PerfMeter.Part.WHEEL, used);
+            SERVER_DECK_CALLS.incrementAndGet();
+            SERVER_DECK_NANOS.addAndGet(used);
+        }
+    }
+
+    /**
+     * The deck cast for one wheel ray. The server shares the dimension's deck budget with the
+     * carry; the client has its own. A ray starts only when its learned cost fits what is left.
+     */
+    private static BlockHitResult deckRay(Level level, ClipContext context, BlockHitResult base, Object wheelMount, TickBudget shared) {
+        List<AbstractContraptionEntity> decks = Decks.of(level);
+        if (decks.isEmpty()) {
             return base;
         }
         try {
@@ -185,28 +248,37 @@ public final class WheelContactRuntime {
             if (ship == null) {
                 return base;
             }
-            List<Candidate> near = candidatesFor(level, ship, live);
+            List<Candidate> near = candidatesFor(level, ship, decks);
             if (near.isEmpty()) {
                 // No deck near this ship: Offroad's own ray, nothing added.
                 return base;
             }
-            TickBudget budget = BUDGETS.computeIfAbsent(level, ignored -> new TickBudget());
-            long tickId = level instanceof net.minecraft.server.level.ServerLevel server
-                    ? server.getServer().getTickCount() : level.getGameTime();
-            budget.begin(tickId, SafeLandingConfig.tickBudgetMicros());
-            if (!budget.allows()) {
+            TickBudget budget = shared;
+            if (budget == null) {
+                budget = BUDGETS.computeIfAbsent(level, ignored -> new TickBudget());
+                budget.begin(level.getGameTime(), SafeLandingConfig.tickBudgetMicros());
+            }
+            com.vucelich.sablesafelanding.sim.CostEstimate rayCost = level.isClientSide() ? CLIENT_RAY_COST : RAY_COST;
+            if (!budget.allows(rayCost.estimate(near.size()))) {
                 BUDGET_SKIPS.incrementAndGet();
+                budget.defer();
+                rayCost.relax();
+                if (level.isClientSide()) {
+                    ClientPerf.budgetSkip();
+                }
                 return base;
             }
             long start = System.nanoTime();
+            BlockHitResult deck = null;
             try {
-                BlockHitResult deck = cast(level, context, base, ship, near, wheelMount);
+                deck = cast(level, context, base, ship, near, wheelMount);
                 return deck == null ? base : deck;
             } finally {
                 long used = System.nanoTime() - start;
                 budget.charge(used);
-                if (!level.isClientSide()) {
-                    PerfMeter.add(PerfMeter.Part.WHEEL, used);
+                rayCost.observe(near.size(), used);
+                if (level.isClientSide()) {
+                    ClientPerf.ray(deck != null);
                 }
             }
         } catch (RuntimeException ex) {
@@ -236,7 +308,7 @@ public final class WheelContactRuntime {
     }
 
     /** Contraptions that can reach this ship's wheel rays this tick. Built once per ship per tick. */
-    private static List<Candidate> candidatesFor(Level level, SubLevel ship, Set<AbstractContraptionEntity> live) {
+    private static List<Candidate> candidatesFor(Level level, SubLevel ship, List<AbstractContraptionEntity> live) {
         long now = level.getGameTime();
         ShipCandidates cached = SHIPS.get(ship);
         if (cached != null && cached.gameTime == now) {
@@ -261,7 +333,7 @@ public final class WheelContactRuntime {
     }
 
     /** Every live contraption's reach in this level, built once per tick and capped. */
-    private static List<Candidate> boundsFor(Level level, Set<AbstractContraptionEntity> live, long now) {
+    private static List<Candidate> boundsFor(Level level, List<AbstractContraptionEntity> live, long now) {
         LevelBounds cached = BOUNDS.get(level);
         if (cached != null && cached.gameTime == now) {
             return cached.all;
