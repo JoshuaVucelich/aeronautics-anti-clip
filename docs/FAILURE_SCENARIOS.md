@@ -1,6 +1,6 @@
 # Failure scenarios
 
-Aeronautics vehicles are Sable sub-levels. The loss that started this mod is a car that fell through a moving Create elevator, then through bedrock. A second loss is an airship deleted after its grabbers froze. This note walks through how those happen and what `0.7.0-rc.8` does about each one.
+Aeronautics vehicles are Sable sub-levels. The loss that started this mod is a car that fell through a moving Create elevator, then through bedrock. A second loss is an airship deleted after its grabbers froze. This note walks through how those happen and what `0.7.0-rc.9` does about each one.
 
 The master switch is the config key `enabled` (default true). `/anticlip off` and `/anticlip on` flip it and save the file. `/anticlip status` prints the switch, the feature flags, how many carry locks are held, and whether the Sable removal hook has run. Off means no rescue, no collider feed, no carry, and no sweep. Disarm clears `sable$initialized` on every claim in the level, including a contraption that was displaced before its collider was uploaded. Turning the feed off in the config does the same restore. Sable's next tick adds its own kinematic collider again. Mixin injects use `require = 0`, the mixin config is not required, and each inject is wrapped so a missing target or a thrown callback logs and returns. Those warnings are limited to one every five seconds. The server tick is not crashed by a Sable or Create mismatch.
 
@@ -25,6 +25,10 @@ A car with Offroad wheels driven onto an elevator rests on the deck with its bod
 ## Server stall with a large contraption loaded (rc.5 and rc.7 server logs)
 
 On Huge Josh Land the main thread froze for about 70 seconds at a time, starting 20 to 30 seconds after a player joined and loaded the elevator, and again every minute or so until he left. It happened with no capture in the log. Every physics tick, carry built a support box for every block of every loaded world contraption and joined them with a pair search that restarted after each join. That grows with the cube of the block count, so a few thousand blocks took seconds per tick and about 7,000 took close to a minute. The stress trial reproduced it with 2,229 blocks and nothing on the elevator: 1.8 s per tick, with every stack sample in `AabbMerger.merge` under `CarryRuntime.supportsFor`. rc.8 does no deck work unless a ship is on or next to a deck, builds a block index once per contraption shape, shapes only the part a ship can reach, and caps that work with `tickBudgetMicros`. The same trial then runs at about 2 ms per tick, with 23,121 and 45,913 block elevators too.
+
+## Lag reported with rc.8
+
+The rc.8 server log shows "Can't keep up" warnings of 2.1 to 4.1 s within seconds of each join and leave. The same server logged the same pattern before this mod was installed, and the only Anti-Clip work in that session was one 55 ms collider build. The steady costs rc.8 did add, even with nothing riding, were void rescue on every ship every physics substep, per-contraption motion samples, and wheel rays that scanned every contraption. rc.9 sleeps all deck work until a deck moves with a ship near it (`idleSleep`), runs the full void rescue only near the void floor or ceiling, caps every deck step before it runs (`tickBudgetMicros`), and returns at once on the client unless a car is near a deck (`clientWheelContact`). Nothing in the mod renders.
 
 ## Airship deleted because grabbers froze
 

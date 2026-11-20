@@ -25,7 +25,7 @@ The sim module does not start Minecraft or link Rapier.
 ./gradlew build
 ```
 
-The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.7.0-rc.8`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
+The jar is `build/libs/sable_safe_landing-<version>.jar`. The release candidate is version `0.7.0-rc.9`. Drop it in the `mods` folder next to Create, Sable, and Create Aeronautics. Bump `mod_version` in `gradle.properties` before a new jar so the hash changes.
 
 `/anticlip status` prints the master switch, the feature flags, the carry locks, and whether the Sable removal hook has run. `/anticlip off` and `/anticlip on` (permission level 2) flip `enabled` and save it. Off disables rescue, the collider feed, carry, and sweep. Failure cases and the guards for them are in `docs/FAILURE_SCENARIOS.md`.
 
@@ -51,9 +51,15 @@ Wheels on a deck also count as resting contact for carry. A car on its suspensio
 
 ## Performance
 
-Deck work only runs while a ship is on or next to a contraption deck. Each tick the mod compares Sable's ship boxes with the contraption bounds; with no overlap it does nothing more for that deck. A deck with a ship on it gets a block index once per contraption shape, built in slices, and the carry only turns the part of the deck within reach of a ship into shapes, only while the deck is moving or holding a ship. Wheel rays far from every deck are Offroad's own ray.
+Nothing in this mod draws anything. There are no render mixins, render events, or client tick listeners. On a client the mod does two things: the wheel ground ray (once per wheel per client tick, never per frame) and an early return in the contraption tick hook.
 
-`tickBudgetMicros` (default 2000, so 2 ms of a 50 ms tick) is a hard cap per dimension per server tick on that work, with a separate cap of the same size for wheel rays against decks. When it runs out, the carry reuses the last deck shape and wheel rays keep Offroad's result until the next tick, so a huge contraption cannot stall the server. 0 turns deck work off. `/anticlip status` prints the cap, the mod's mean and worst time per tick, and how often each cap ran out.
+`idleSleep` (default on). Each server tick the mod reads each world deck's anchor once. Until a deck moves with a ship on or next to it, or holds a ship, the carry, deck shapes, and sweep do nothing, and ships are not scanned. Whether any ship is near any deck (used to get a deck's index ready before it moves, and by the server wheel rays) is rechecked every 10 ticks. Void rescue only runs its full step for a ship within 32 blocks (plus its fall speed) of the void floor or the build ceiling. Off restores the rc.8 behavior of running the deck checks every tick. It never changes how a riding ship is carried.
+
+`clientWheelContact` (default on, client only). Draws a wheel on a deck at the deck instead of sunk through it. Away from every deck the check costs about 15 to 50 ns per wheel ray. Off leaves Offroad's own ray. The server still decides driving.
+
+`tickBudgetMicros` (default 2000, so 2 ms of a 50 ms tick, range 0 to 50000) is a hard cap per dimension per server tick. Every capped step is checked before it runs against a learned cost, with a quarter of the cap kept back for wheel rays: deck index slices, deck shapes, capture block tests, wheel rays against decks, and collider uploads past the first one in a tick. A step that does not fit waits for the next tick, so a big build is spread over ticks. Values 1 to 499 are raised to 500, so a tiny cap cannot starve deck work (at about 60 ns per block, a 23,121-block index still finishes in about 4 ticks; that is an estimate, not a trial). 0 turns deck work off. Not capped: one collider upload per dimension per tick (a 23,121-block deck takes about 6 to 8 ms, once per assembly) and placing a ship that is already riding.
+
+`/anticlip status` prints a second line, `Server time`: mean and worst microseconds per tick, the last minute's mean and worst, ticks over 20 us, how many level-ticks did deck work, budget-out ticks, deferred steps, deferred index builds, collider uploads (and deferred), and void rescue full steps versus skipped. `/anticlip status reset` (op level 2) clears those counters. On a client, `/anticlipc status` prints the client's own mean and worst time per client tick, hook calls, wheel rays, and rays on a deck; `/anticlipc reset` clears them.
 
 ## Carry
 
