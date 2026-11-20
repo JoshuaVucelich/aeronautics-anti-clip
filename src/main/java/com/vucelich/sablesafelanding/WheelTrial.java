@@ -637,6 +637,26 @@ public final class WheelTrial {
         } catch (RuntimeException ex) {
             SableSafeLanding.LOGGER.warn("WHEELS could not restore the switches", ex);
         }
+        long calls = WheelContactRuntime.serverDeckCalls();
+        long nanos = WheelContactRuntime.serverDeckNanos();
+        log("PERF java={} arch={} ticks={} modMeanUs={} modWorstUs={} deckRayCalls={} deckRayMeanNs={} budgetSkips={} parts={}",
+                System.getProperty("java.vm.version"), System.getProperty("os.arch"), PerfMeter.ticks(),
+                String.format(java.util.Locale.ROOT, "%.1f", PerfMeter.meanMicros()), PerfMeter.worstMicros(),
+                calls, calls == 0 ? 0 : nanos / calls, WheelContactRuntime.budgetSkips(),
+                java.util.Arrays.toString(PerfMeter.parts()));
+        // The client's per-wheel check before any deck work: the switches and the cached deck list.
+        net.minecraft.server.level.ServerLevel overworld = server.overworld();
+        long sink = 0;
+        for (int round = 0; round < 3; round++) {
+            long t0 = System.nanoTime();
+            for (int i = 0; i < 1_000_000; i++) {
+                if (SafeLandingConfig.clientWheelContact() && SafeLandingConfig.running() && WheelContactRuntime.switchOn()) {
+                    sink += Decks.of(overworld).size();
+                }
+            }
+            log("PERF idleWheelGateNsPerCall round={} ns={} sink={}", round,
+                    String.format(java.util.Locale.ROOT, "%.1f", (System.nanoTime() - t0) / 1_000_000.0), sink);
+        }
         log("stopping");
         server.halt(false);
     }
