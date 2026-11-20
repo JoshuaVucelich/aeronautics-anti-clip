@@ -24,6 +24,11 @@ public final class SableSafeLanding {
         NeoForge.EVENT_BUS.addListener(ColliderFeedRuntime::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(CarryRuntime::onPrePhysics);
         NeoForge.EVENT_BUS.addListener(CarryRuntime::onServerTick);
+        // Closes the mod's per-tick timer. Registered after every other server tick hook.
+        NeoForge.EVENT_BUS.addListener(PerfMeter::onServerTick);
+        if (net.neoforged.fml.loading.FMLEnvironment.dist.isClient()) {
+            NeoForge.EVENT_BUS.addListener(ClientCommands::register);
+        }
         NeoForge.EVENT_BUS.addListener(AntiClipCommand::register);
         NeoForge.EVENT_BUS.addListener(LiveContraptions::onJoin);
         NeoForge.EVENT_BUS.addListener(LiveContraptions::onLeave);
@@ -63,12 +68,16 @@ public final class SableSafeLanding {
         ColliderFeedRuntime.forgetDimension(dimension);
         VoidRescueRuntime.forgetDimension(dimension);
         CarryRuntime.forgetDimension(dimension);
+        DeckGate.forgetDimension(dimension);
+        VoidRescueRuntime.forgetBand(dimension);
     }
 
     private static void onStop(ServerStoppingEvent event) {
         ColliderFeedRuntime.clear();
         VoidRescueRuntime.clear();
         CarryRuntime.clear();
+        DeckGate.clear();
+        Decks.clear();
         PlatformTrace.clear();
     }
 }

@@ -18,6 +18,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class LiveContraptions {
     private static final Map<Level, Set<AbstractContraptionEntity>> LIVE = new ConcurrentHashMap<>();
+    /** Bumped on every join and leave, so a cached deck list knows when to rebuild. */
+    private static final java.util.concurrent.atomic.AtomicInteger VERSION = new java.util.concurrent.atomic.AtomicInteger();
 
     private LiveContraptions() {
     }
@@ -30,6 +32,11 @@ public final class LiveContraptions {
         return live == null ? Collections.emptySet() : live;
     }
 
+    /** Changes whenever any level's contraption set changes. */
+    public static int version() {
+        return VERSION.get();
+    }
+
     public static int count(Level level) {
         return in(level).size();
     }
@@ -37,6 +44,7 @@ public final class LiveContraptions {
     public static void onJoin(EntityJoinLevelEvent event) {
         if (event.getEntity() instanceof AbstractContraptionEntity entity && event.getLevel() != null) {
             LIVE.computeIfAbsent(event.getLevel(), ignored -> ConcurrentHashMap.newKeySet()).add(entity);
+            VERSION.incrementAndGet();
         }
     }
 
@@ -48,6 +56,7 @@ public final class LiveContraptions {
         if (live != null) {
             live.remove(entity);
         }
+        VERSION.incrementAndGet();
         if (!event.getLevel().isClientSide()) {
             DeckShapes.forget(entity.getUUID());
         }
@@ -56,11 +65,14 @@ public final class LiveContraptions {
     public static void onUnload(LevelEvent.Unload event) {
         if (event.getLevel() instanceof Level level) {
             LIVE.remove(level);
+            VERSION.incrementAndGet();
+            Decks.forget(level);
             WheelContactRuntime.forget(level);
         }
     }
 
     public static void clear() {
         LIVE.clear();
+        VERSION.incrementAndGet();
     }
 }
