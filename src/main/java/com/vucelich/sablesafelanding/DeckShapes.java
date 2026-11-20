@@ -25,6 +25,15 @@ public final class DeckShapes {
     private static final int SLICE = 256;
 
     private static final Map<UUID, Build> BUILDS = new ConcurrentHashMap<>();
+    /** Learned cost of adding one block to an index. */
+    private static final com.vucelich.sablesafelanding.sim.CostEstimate SLICE_COST =
+            new com.vucelich.sablesafelanding.sim.CostEstimate(60.0, 2.0, 64);
+    private static long deferredBuilds;
+
+    /** Index builds that stopped for the tick because the next slice would not fit, so they go on next tick. */
+    public static long deferredBuilds() {
+        return deferredBuilds;
+    }
 
     private DeckShapes() {
     }
@@ -72,7 +81,7 @@ public final class DeckShapes {
         long began = start;
         build.ticks++;
         try {
-            while (budget.allows()) {
+            while (budget.allowsBulk(SLICE_COST.estimate(Math.min(SLICE, Math.max(1, build.expected - build.index.size()))))) {
                 int added = 0;
                 while (added < SLICE && build.cursor.hasNext()) {
                     BlockPos pos = build.cursor.next();
@@ -81,6 +90,7 @@ public final class DeckShapes {
                 }
                 long now = System.nanoTime();
                 budget.charge(now - start);
+                SLICE_COST.observe(added, now - start);
                 start = now;
                 if (!build.cursor.hasNext()) {
                     if (build.index.size() != build.expected || blocks.size() != build.expected) {
@@ -98,6 +108,9 @@ public final class DeckShapes {
                 }
             }
             build.spentNanos += System.nanoTime() - began;
+            deferredBuilds++;
+            budget.defer();
+            SLICE_COST.relax();
             return null;
         } catch (ConcurrentModificationException ex) {
             // The block map changed during a slice. Start over next tick.

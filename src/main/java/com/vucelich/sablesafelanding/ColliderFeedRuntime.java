@@ -51,6 +51,16 @@ public final class ColliderFeedRuntime {
     private static final Map<String, long[]> PLANNED = new HashMap<>();
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static boolean deferredWarning;
+    private static boolean hookRan;
+    /** Decks the hook offered that are not taken over yet. Sable's collider stays until they are. */
+    private static final Map<String, AbstractContraptionEntity> PENDING = new HashMap<>();
+    /** Learned cost of one upload per contraption block. */
+    private static final com.vucelich.sablesafelanding.sim.CostEstimate UPLOAD_COST =
+            new com.vucelich.sablesafelanding.sim.CostEstimate(200.0, 5.0, 64);
+    /** Game tick and dimension of the last upload, so at least one per tick always goes through. */
+    private static final Map<String, Long> UPLOADED_AT = new HashMap<>();
+    private static long deferredUploads;
+    private static long uploads;
 
     private ColliderFeedRuntime() {
     }
@@ -59,9 +69,27 @@ public final class ColliderFeedRuntime {
      * The contraption mixin ran for this entity. Server thread only.
      */
     public static void noteHook(AbstractContraptionEntity entity) {
+        hookRan = true;
+    }
+
+    /**
+     * The tick hook saw a world deck this mod should own. It is taken over later, in the feed's
+     * own tick and inside the budget, by {@link #apply}. Server thread only.
+     */
+    public static void offer(AbstractContraptionEntity entity) {
         if (onServerThread(entity)) {
-            HOOKED.add(entity.getUUID().toString());
+            PENDING.put(entity.getUUID().toString(), entity);
         }
+    }
+
+    /** Collider uploads put off to a later tick because the budget was used up. */
+    public static long deferredUploads() {
+        return deferredUploads;
+    }
+
+    /** Collider uploads done since startup. */
+    public static long uploads() {
+        return uploads;
     }
 
     /**
@@ -76,7 +104,7 @@ public final class ColliderFeedRuntime {
     }
 
     public static boolean hookSeen() {
-        return !HOOKED.isEmpty();
+        return hookRan || !HOOKED.isEmpty();
     }
 
     public static boolean isClaimed(String id) {
@@ -130,12 +158,17 @@ public final class ColliderFeedRuntime {
         PLANNED.clear();
         HASHES.clear();
         FAILED.clear();
+        PENDING.clear();
+        UPLOADED_AT.clear();
     }
 
     public static void forgetDimension(String dimension) {
         PLANNERS.remove(dimension);
         SYNCED_AT.remove(dimension);
         PLANNED.remove(dimension);
+        UPLOADED_AT.remove(dimension);
+        PENDING.values().removeIf(entity -> entity == null || !(entity.level() instanceof ServerLevel server)
+                || server.dimension().location().toString().equals(dimension));
         Map<String, FedContraptionCollider> fed = FED.remove(dimension);
         if (fed != null) {
             HOOKED.removeAll(fed.keySet());
@@ -241,6 +274,7 @@ public final class ColliderFeedRuntime {
                 }
             }
             restoreClaims(dimension);
+            PENDING.values().removeIf(entity -> entity == null || entity.level() == level);
         } catch (RuntimeException ex) {
             logFailure(ex);
         }
@@ -298,6 +332,7 @@ public final class ColliderFeedRuntime {
             CLAIMS.remove(id);
             CLAIMED.remove(id);
         }
+        PENDING.entrySet().removeIf(entry -> gone(entry.getValue(), dimension));
     }
 
     private static boolean gone(AbstractContraptionEntity entity, String dimension) {
@@ -395,6 +430,7 @@ public final class ColliderFeedRuntime {
         }
         CLAIMS.clear();
         CLAIMED.clear();
+        PENDING.clear();
     }
 
     private static void sync(ServerLevel level, PhysicsPipeline pipeline) {
@@ -493,22 +529,34 @@ public final class ColliderFeedRuntime {
             case ADD, REBUILD -> {
                 AbstractContraptionEntity entity = entities.get(action.id());
                 if (!CLAIMED.contains(action.id())) {
-                    planner.forget(action.id());
-                    if (entity != null && entity.tickCount > 0) {
-                        warnDeferred();
+                    AbstractContraptionEntity offered = PENDING.get(action.id());
+                    if (offered == null || offered != entity || entity == null) {
+                        planner.forget(action.id());
+                        if (entity != null && entity.tickCount > 0) {
+                            warnDeferred();
+                        }
+                        return;
                     }
-                    return;
+                    if (!(entity.level() instanceof ServerLevel serverLevel) || !uploadFits(serverLevel, entity)) {
+                        // Over budget: Sable's own collider stays on this deck until a later tick.
+                        planner.forget(action.id());
+                        deferredUploads++;
+                        return;
+                    }
+                    if (!Boolean.TRUE.equals(sableInitialized(entity))) {
+                        // Sable has not added its own body yet; try again next tick.
+                        planner.forget(action.id());
+                        return;
+                    }
+                    PENDING.remove(action.id());
+                    claim(entity);
+                    displaceSable(entity);
                 }
                 if (action.type() == FeedAction.Type.REBUILD) {
                     remove(pipeline, fed, action.id());
                 }
                 long buildStart = System.nanoTime();
                 FedContraptionCollider collider = entity == null ? null : FedContraptionCollider.tryCreate(entity);
-                if (collider != null) {
-                    SableSafeLanding.LOGGER.info("LIVE feed collider {} blocks={} ms={}", action.id(),
-                            entity.getContraption().getBlocks().size(),
-                            String.format(java.util.Locale.ROOT, "%.2f", (System.nanoTime() - buildStart) / 1_000_000.0));
-                }
                 if (collider == null || pipeline == null) {
                     planner.forget(action.id());
                     if (entity != null && collider == null) {
@@ -519,6 +567,16 @@ public final class ColliderFeedRuntime {
                 try {
                     pipeline.add(collider);
                     fed.put(action.id(), collider);
+                    long used = System.nanoTime() - buildStart;
+                    int blocks = entity.getContraption().getBlocks().size();
+                    UPLOAD_COST.observe(Math.max(1, blocks), used);
+                    uploads++;
+                    if (entity.level() instanceof ServerLevel serverLevel) {
+                        CarryRuntime.budget(serverLevel).charge(used);
+                        UPLOADED_AT.put(serverLevel.dimension().location().toString(), serverLevel.getGameTime());
+                    }
+                    SableSafeLanding.LOGGER.info("LIVE feed collider {} blocks={} ms={}", action.id(), blocks,
+                            String.format(java.util.Locale.ROOT, "%.2f", used / 1_000_000.0));
                 } catch (RuntimeException ex) {
                     planner.forget(action.id());
                     logFailure(ex);
@@ -535,14 +593,30 @@ public final class ColliderFeedRuntime {
      * most every {@link #REHASH_TICKS}, instead of every physics substep.
      */
     private static long shapeHash(Contraption contraption, long now) {
-        int size = contraption.getBlocks().size();
-        long[] cached = HASHES.get(contraption);
-        if (cached != null && cached[0] == size && now - cached[2] < REHASH_TICKS && now >= cached[2]) {
-            return cached[1];
+        // A Create contraption's blocks are fixed while it is assembled, and a re-assembly is a new
+        // Contraption object. Identity and block count find every change without reading a block,
+        // so there is no per-block rehash and no once-a-minute recheck spike.
+        return System.identityHashCode(contraption) * 0x9E3779B97F4A7C15L + contraption.getBlocks().size();
+    }
+
+    /**
+     * One upload per dimension per tick always goes through, so a deck is never stuck on
+     * Sable's collider. More in the same tick only when the learned cost fits the budget.
+     */
+    private static boolean uploadFits(ServerLevel level, AbstractContraptionEntity entity) {
+        String dimension = level.dimension().location().toString();
+        Long last = UPLOADED_AT.get(dimension);
+        if (last == null || last != level.getGameTime()) {
+            return true;
         }
-        long hash = ContraptionKinds.shapeHash(contraption);
-        HASHES.put(contraption, new long[]{size, hash, now});
-        return hash;
+        int blocks = entity.getContraption() == null ? 1 : entity.getContraption().getBlocks().size();
+        com.vucelich.sablesafelanding.sim.TickBudget budget = CarryRuntime.budget(level);
+        boolean fits = budget.allowsBulk(UPLOAD_COST.estimate(Math.max(1, blocks)));
+        if (!fits) {
+            budget.defer();
+            UPLOAD_COST.relax();
+        }
+        return fits;
     }
 
     private static void remove(PhysicsPipeline pipeline, Map<String, FedContraptionCollider> fed, String id) {
