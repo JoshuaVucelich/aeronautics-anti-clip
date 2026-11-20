@@ -67,6 +67,19 @@ public abstract class ServerSubLevelMixin {
     private void rescueNow() {
         VoidRescueRuntime.noteRemovalHook();
         ServerSubLevel subLevel = (ServerSubLevel) (Object) this;
+        if (!VoidRescueRuntime.needsStep(subLevel)) {
+            // Far from every rescue line: nothing to do, and nothing measured beyond this check.
+            return;
+        }
+        long start = System.nanoTime();
+        try {
+            rescueStep(subLevel);
+        } finally {
+            com.vucelich.sablesafelanding.PerfMeter.add(com.vucelich.sablesafelanding.PerfMeter.Part.RESCUE, System.nanoTime() - start);
+        }
+    }
+
+    private void rescueStep(ServerSubLevel subLevel) {
         SubLevelPhysicsSystem system = SubLevelPhysicsSystem.get(subLevel.getLevel());
         var pipeline = system == null ? null : system.getPipeline();
         if (SubLevelContainer.getContainer(subLevel.getLevel()) instanceof ServerSubLevelContainer) {

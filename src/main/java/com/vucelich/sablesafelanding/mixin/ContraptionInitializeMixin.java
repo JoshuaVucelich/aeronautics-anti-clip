@@ -49,14 +49,22 @@ public abstract class ContraptionInitializeMixin {
     }
 
     private void afterSable() {
+        AbstractContraptionEntity entity = (AbstractContraptionEntity) (Object) this;
+        // The client has no collider feed: one field read and out.
+        if (entity.level().isClientSide()) {
+            return;
+        }
         if (!SafeLandingConfig.running()) {
             return;
         }
-        AbstractContraptionEntity entity = (AbstractContraptionEntity) (Object) this;
         ColliderFeedRuntime.noteHook(entity);
+        if (ColliderFeedRuntime.isClaimed(entity.getUUID().toString())) {
+            return;
+        }
         if (ColliderFeedRuntime.shouldOwn(entity)) {
-            ColliderFeedRuntime.claim(entity);
-            ColliderFeedRuntime.displaceSable(entity);
+            // Not taken yet: the feed takes it over in its own tick, inside the budget. Until then
+            // Sable's own collider stays in place, so the deck is never without a collider.
+            ColliderFeedRuntime.offer(entity);
         }
     }
 
@@ -68,10 +76,10 @@ public abstract class ContraptionInitializeMixin {
     }
 
     private void suppress(CallbackInfoReturnable<Boolean> ci) {
-        if (!SafeLandingConfig.running()) {
+        AbstractContraptionEntity entity = (AbstractContraptionEntity) (Object) this;
+        if (entity.level().isClientSide() || !SafeLandingConfig.running()) {
             return;
         }
-        AbstractContraptionEntity entity = (AbstractContraptionEntity) (Object) this;
         if (ColliderFeedRuntime.isClaimed(entity.getUUID().toString())) {
             ci.setReturnValue(false);
         }

@@ -8,36 +8,36 @@ This repo is not published to Modrinth or CurseForge.
 
 Each milestone bumps `mod_version` so the built jar hash changes. Headless repros live in `:sim:test` and do not start Minecraft or Rapier.
 
-## M0 — Project, config, headless harness
+## M0: Project, config, headless harness
 
 - NeoForge mod skeleton, common config, and a Minecraft-free sim module.
 - `HeadlessLandingHarness` integrates gravity with protection off, so a dropped body falls.
 - Test: `HarnessBaselineTest`.
 
-## M1 — Void rescue
+## M1: Void rescue
 
 - Remember each sub-level's last safe pose, keyed by dimension and ship id.
 - Shift Y in place only when the pose is valid and the bounds are at or just inside Sable's `sub_level_remove` check. Min build height is not a trigger.
 - An invalid pose with no recent, nearby last safe pose is left for Sable. It is not rebuilt at the origin.
 - Repro: `VoidRescueTest` (in-place clamp at the remove bound, fail-open NaN, stale or distant last safe pose ignored).
 
-## M2 — Contraption colliders in Sable/Rapier
+## M2: Contraption colliders in Sable/Rapier
 
 - Feed elevator, bearing (including clockwork and stabilized), piston, and gantry colliders into Sable's kinematic pipeline.
 - World contraptions are owned by this mod. Contraptions already inside a sub-level stay on Sable's own path.
 - Repro: `ColliderFeedTest` (elevator is added, a windmill-only or unknown kind is ignored, a block change rebuilds, removal unfeeds).
 
-## M3 — Carry / parent
+## M3: Carry / parent
 
 - A sub-level resting on a moving contraption takes that contraption's translation, or its bearing rotation about the pivot.
-- Repro: `CarryTest` — a car on an elevator that jumps upward stays on the platform; bearing, piston, and gantry cases move with the support instead of falling through.
+- Repro: `CarryTest`: a car on an elevator that jumps upward stays on the platform; bearing, piston, and gantry cases move with the support instead of falling through.
 
-## M4 — Swept penetration limit
+## M4: Swept penetration limit
 
 - Sweep the sub-level's displacement against contraption volumes and stop it so remaining overlap is at most `maxPenetration`.
-- Repro: `SweepTest` — a fast body does not tunnel through a thin platform; discrete overlap alone would miss.
+- Repro: `SweepTest`: a fast body does not tunnel through a thin platform; discrete overlap alone would miss.
 
-## M5 — Hardening and release candidate
+## M5: Hardening and release candidate
 
 - Spatial hash, merged support boxes, NaN rejection, per-feature kill switches, and a rate-limited failure path.
 - Repro: `HardeningTest`.
@@ -46,7 +46,7 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - A separate bedrock rescue restores a sub-level that has stayed below min build height minus 32 blocks for 40 ticks to its last safe pose in the same dimension, with velocity zeroed. It does not use the 32-block distance gate, and it does not fire at the remove bounds.
 - Version `0.6.0-rc.24` jar. Still not published to Modrinth or CurseForge.
 
-## M6 — Failure scenarios
+## M6: Failure scenarios
 
 - `docs/FAILURE_SCENARIOS.md` records the elevator fall, a frozen-grabber deletion, and the surrounding cases.
 - Carry releases on chunk unload without teleporting, refuses a one-tick step past 4 blocks or 90 degrees, and skips the ride velocity when a physics substep is longer than 0.25 seconds. A car on a carried ship is translated with that ship. New captures examine at most 32 ships a tick and stop at 32 locks.
@@ -75,3 +75,75 @@ Each milestone bumps `mod_version` so the built jar hash changes. Headless repro
 - A level tick prunes seats only in that dimension. A Nether or End tick no longer clears every Overworld seat.
 - A car that leaves the hull drops its seat. A child that takes its own lock, or whose level is no longer the one being ticked, drops its seat too.
 - Version `0.7.0-rc.3` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.4
+
+- Offroad wheel rays land on Create contraption decks. Before this, a car's body rested on an elevator deck while its wheels sank through it, so it could not drive on or off. Config `wheelContact`, default on.
+- Wheels on a deck count as carry contact, so a car parked on its wheels on a bearing deck turns with it.
+- `/anticlip status` prints `wheelContact` and `wheelDeckHits`.
+- Repro: `WheelContactTest` (ray bounds, nearby check, closer hit wins). Live trial: `-Dsable_safe_landing.wheels=true`.
+- Version `0.7.0-rc.4` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.5
+
+- A wheel touch counts as carry contact only within the suspension reach (rest + tire radius + 0.25) and on an up-facing face, as Offroad itself decides. A wheeled ship hovering above a moving deck is no longer grabbed, and takeoff release is not delayed.
+- Contraption bounds are cached once per level per tick (capped at 256), and each ship is checked once per tick. A wheel ray from a ship far from every contraption does three map reads. The mount's ship is cached, so no Sable lookup runs per ray.
+- Expired wheel touches and idle ship entries are pruned every tick and on level unload.
+- `wheelDeckHits` counts only accepted server hits. `/anticlip status` adds `wheelTouches`.
+- `wheelContact` is documented as not synced: the server's value decides driving and carry, the client's only changes where wheels are drawn.
+- Live trial adds driving while the elevator moves and an off-center turntable.
+- Version `0.7.0-rc.5` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.6
+
+- A heavy wheeled ship on a moving elevator now moves at the deck's speed. While the deck is sliding, carry places the ship on its deck offset every tick and sets the Rapier body velocity to the deck velocity, during the capture confirm too. Before, only the pose-delta field was written, so the body trailed the deck, sank onto it, and a rebound looked like a takeoff and released the lock.
+- When the deck stops, the ship is placed once more and the ride velocity is cleared, so it does not coast past the top.
+- Bearings are unchanged: a turning deck is not sliding.
+- Wheel trial adds a heavy ship (about 140 blocks, large tires, 11x11 deck) riding up and down at 32, 128, and 256 rpm, plus 256 rpm with `wheelContact` off.
+- Version `0.7.0-rc.6` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.7
+
+- The horizontal deck-frame offset is stored when the capture confirm finishes, not at the first touch. The height stays the first touch's resting height, and a bearing keeps the whole first-touch offset. A ship that moved over the deck during the confirm was pulled back to the first touch, or released as `separated` when that was more than 8 blocks away. That is the release the real server logged after the fling.
+- On a sliding deck, a ship moving more than 2 blocks per second across it, relative to the deck, restarts the confirm and logs `LIVE deck skid` once. A flung or pushed ship is captured only after it has stopped on the deck. Turntables are not checked.
+- Wheel trial adds `heavy-up-16` and `heavy-down-16` (the real server's elevator speed) and `heavy-fling-16`, which scripts the real fling (113 blocks per second) and skid (50 blocks per second for 6 ticks) on a 27x27 deck. `-Dsable_safe_landing.cases=a,b` runs only the named cases.
+- Version `0.7.0-rc.7` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.8
+
+- Fixes the server stall on Huge Josh Land. With rc.5 and rc.7 the main thread froze for about 70 seconds at a time while the elevator contraption was loaded, even with nothing on it. Cause: every physics tick, carry rebuilt support boxes for every block of every loaded world contraption and joined them with `AabbMerger`, which restarts its pair search after every join. That cost grows with the cube of the block count: 2,229 blocks took 1.8 s per tick in the stress trial, and 6,854 blocks took about 50 s in a bench. The code dates from 0.6.0-rc.2 and was first run on the server today. The wheel ray code was not the cause.
+- Deck work now runs only while a ship is on or next to a contraption deck. A bounds test against Sable's ship boxes decides that, never a block scan. The deck shapes are built only while that deck has moved in the last 40 ticks or holds a ship. A deck with nothing on it costs a motion sample and one box test per tick.
+- Deck shapes come from a per-contraption index of block cells, built once per contraption shape a slice at a time, and only for the part of the deck within reach of a ship. Blocks are joined with `GridMerger`, a greedy mesh that is close to linear: a 5,985-block layout that took `AabbMerger` 37 s takes about 5 ms, and 45,913 blocks take about 33 ms. On the live path only the reachable part of a deck is merged. A deck turned off a quarter turn only joins blocks along its axis, so the rotated boxes cover the same space as before.
+- New config `tickBudgetMicros`, default 2000 (2 ms), range 0 to 50000. It is a hard cap per dimension per server tick on deck index building and deck shapes, and separately on wheel rays against decks. Past the cap the carry reuses the last deck shape and wheel rays keep Offroad's own result for the rest of the tick. 0 turns deck work off.
+- The collider feed plans once per game tick instead of every physics substep, reads the live contraption list instead of every entity, caches each contraption's shape hash, skips re-planning while nothing changed (at most 20 ticks), and does not retry a collider that failed to build until its shape changes.
+- Carry capture checks that the deck is moving before any block test, and only looks at ships whose box touches a deck. The ship block test stops after 32,768 cells.
+- `/anticlip status` adds `tickBudgetMicros`, the mod's mean and worst time per tick, the deck index count, and how often each budget ran out. The log notes `LIVE feed collider` and `LIVE deck index` with block counts and build time.
+- Stress trial: `-Dsable_safe_landing.stress=true` (`stress.half`, `stress.layers`, `stress.rpm`, `stress.modOff`). A large glued elevator, a heavy wheeled ship parked away from it, and a fake player on the deck; then a second heavy ship rides the elevator. Logs tick time and the mod's own time per phase.
+- Version `0.7.0-rc.8` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.9
+
+- Performance is the release gate. Joshua reported rc.8 made the game lag. The rc.8 server log (Nov 18) shows four "Can't keep up" warnings of 2.1 to 4.1 s. Three came within seconds of a join or leave (corrected in rc.10: an earlier version of this note said all four). The fourth, 4.07 s, came mid-session, 22 s after a join. Logs from Nov 17 and Nov 18, before Anti-Clip was installed, show the same pattern at join (3.3 s, 3.8 s, up to 17 s). The only Anti-Clip work logged in that session was one 55 ms collider build for the 2,302-block elevator, which keeps the same id across sessions and was never rebuilt per trip. The three join stalls match the server's own join cost; the mid-session one is not explained. What rc.8 did cost every tick even with nothing riding: void rescue on every ship every substep, a motion sample with string keys for every contraption, the live-key scan, wheel rays scanning every contraption's bounds, and a client contraption tick hook. None of it ran per frame and there is no render code. This release removes or gates all of it.
+- New `idleSleep` (default on). A per-level deck gate reads each world deck's anchor once per tick. Deck work runs only while a deck that moved in the last 40 ticks has a ship within reach, or a ship is held. Whether any ship is near any deck is rechecked every 10 ticks, so a deck's index is ready before it moves. A second check at the end of the tick catches a deck that started moving after the first check, so a ride starts on the deck's first moving tick. Off runs the checks every tick like rc.8.
+- New `clientWheelContact` (default on, client only). The client ground ray does nothing while the car is away from decks. The contraption tick hook returns at once on the client.
+- `tickBudgetMicros` caps background deck work (corrected in rc.10: this said "a true hard cap", but it does not cap active carry or the first upload per tick). Every capped step is checked before it runs against a learned cost per unit, with a quarter of the cap kept for wheel rays: index slices, deck shapes, capture block tests, wheel rays, and collider uploads after the first in a tick. Merge and wheel rays share one budget. A learned cost rises at most fourfold per sample, small samples are counted as at least 64 units, and deferred work halves any excess, so a cold JIT or GC pause cannot lock a step out. Values 1 to 499 are raised to 500.
+- Void rescue runs its full step only for a ship within 32 blocks plus its fall speed of the void floor or build ceiling. Everything else is a height read.
+- Deck list cached per level and rebuilt when a contraption joins or leaves, or next tick while one is still loading. The collider takeover reuses Sable's own mass tracker and bounds instead of building them a second time, keeps Sable's collider until the takeover, and paces uploads. The shape hash no longer walks every block.
+- `/anticlip status` adds a `Server time` line (mean and worst per tick, last minute, busy ticks, gate counts, budget-outs, deferred steps and builds, uploads, rescue steps versus skipped). `/anticlip status reset` (op 2). Client command `/anticlipc status` and `/anticlipc reset`.
+- Stress trial adds `stress.count`, `stress.smallHalf`, `stress.ships`, `stress.reload`, and `stress.churn` (small decks disassemble, reassemble, and take a trip every 60 ticks). Wheel trial logs a `WHEELS PERF` line with the mod's tick time, deck ray calls and mean cost, and the idle client wheel check per call.
+- Results, Linux box and Joshua's Mac mini (M4, Zulu 21 arm64, headless dedicated server in a scratch folder): 93 unit tests pass. Wheel trial 37 of 37 results match rc.8 on both machines (two gap readings differ by 0.01), 0 takeoff releases, `heavy-fling-16` spike, skid, and recapture as in rc.8. Live trial 13 of 13 `outcome=` lines match rc.8. Corrected in rc.10: that comparison only read `outcome=` lines. The bedrock rescue line did not match: with `idleSleep` on the car ended at minY -132.56, still falling, instead of being restored. Fixed in rc.10.
+- Stress, 23,121-block elevator, 64 small decks, 12 parked ships, heavy rider, mean server tick in ms with the mod on and off. Box: idle still 4.25 and 4.16, idle moving 3.30 and 3.40, ride 3.72 and 6.74, churn 4.07 and 7.53, reload 3.48 and 3.30. Mac: idle still 4.15 and 3.31, idle moving 3.37 and 3.58, ride 2.87 and 5.18, churn 4.20 and 7.31, reload 3.43 and 3.35. The mod's own time with nothing riding: 103 us per tick on the box and 135 us on the Mac (rc.8 under QA's same load: 249 us). The ride is held with 0.31 max lag on both.
+- Version `0.7.0-rc.9` jar. Still not published to Modrinth or CurseForge.
+
+## Release candidate 0.7.0-rc.10
+
+- Fixes void and bedrock rescue with `idleSleep` on (the default). rc.9 ran the full rescue step only inside the band near the void floor, build ceiling, or bedrock line, so the safe pose was only recorded there. A car parked on the surface and pushed through bedrock had no pose to go back to and kept falling (live trial: minY -132.56 at 23.5 blocks/s). Now every ship outside the band gets a cheap safe-pose record: every 10 ticks its position, box, and rotation are copied into one reused array per ship (no allocation after the first) when it is not falling fast and is above min build height. When the ship enters the band the record seeds the rescue tracker if it is newer. The expensive step stays gated. The record logic is in `sim/ParkedPose` with 4 new unit tests.
+- A car parked on a deck that has not moved no longer casts its wheel rays through the deck every tick. Each wheel mount keeps its last answer per ray, reused while no deck moved, no contraption joined or left, the car moved less than 0.001 blocks, and Offroad's own hit is the same, for at most 100 ticks.
+- A ship with no deck within its wheel reach plus 1 block skips the server wheel deck check from a per-ship answer, reused while no deck moved and the ship moved less than 1 block, for at most 100 ticks. The level's deck bounds are reused the same way.
+- A deck's collider is taken over from Sable only while a ship is within 48 blocks (plus 2 seconds of its speed), rechecked every 10 ticks. Far decks keep Sable's own collider. A deck waiting this way does not keep the feed re-planning every tick.
+- `tickBudgetMicros` is documented as what it is: a cap on background deck work. It does not cap active carry or the first collider upload in a tick. Ride ticks peaked at 6 to 9 ms of the mod's time in the stress trial, and the first upload of a 23,121-block deck took 6.5 to 10.8 ms on the box.
+- `clientWheelContact` stays on by default. It is tick logic: the client wheel ray also sees decks, so the wheel extension Offroad stores and later draws stands on a deck. Off leaves Offroad's client ray untouched.
+- `/anticlip status` adds decks waiting for a ship, wheel rays answered from memory, and parked safe-pose records. The stress trial logs the same counters and wheel memo misses by reason.
+- Results (Linux box): 97 unit tests pass. Live trial compared line by line against rc.8, every result line including void and bedrock: 13 of 13 outcomes match, void-off and void-on match, and bedrock is restored (minY -40.00, the resting pose, against -40.77 in rc.8, whose pose came from the first ticks of the push; after the dwell -40.67 against -41.44). The only other difference: each case's "contraption present" line now shows claimed=false at assembly, because the takeover waits for the ship; every later line matches. Wheel trial 37 of 37 results identical to rc.9 (which matched rc.8 apart from deck hit counts and 0.01 gaps), 0 takeoff releases, heavy-fling-16 relX -10.01 as before. Mac mini (M4, Zulu 21 arm64, scratch folder, deleted afterward): live trial identical to the box, including bedrock; wheel trial 37 of 37 results with the same outcomes as the box; differences are deck hit counts in three heavy-16 cases and heavy-down-16 reading maxGap 1.05 and maxLag 0.24 (box 1.13 and 0.32). The Mac had a load average over 100 from other work during the run, so its timings are not reported.
+- Stress trial on the box, rc.9 and rc.10 back to back in one session, the mod's own time per tick: idle with the deck still 127 and 130 us (rc.9) against 123, 130, and 162 us (rc.10); reload with a car parked on a stopped deck 307 against 253 and 259 (wheel rays 160 against 120 and 124); churn 637 and 717 against 236, 236, and 282. A fourth rc.10 run hit an unexplained 315 ms server tick and read 352 us idle. Mod off: 31 to 46 us.
+- Version `0.7.0-rc.10` jar. Still not published to Modrinth or CurseForge.

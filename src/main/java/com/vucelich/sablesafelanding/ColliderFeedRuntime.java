@@ -2,6 +2,7 @@ package com.vucelich.sablesafelanding;
 
 import com.simibubi.create.content.contraptions.AbstractContraptionEntity;
 import com.simibubi.create.content.contraptions.Contraption;
+import com.vucelich.sablesafelanding.sim.Aabb;
 import com.vucelich.sablesafelanding.sim.AntiClipConfig;
 import com.vucelich.sablesafelanding.sim.RateLimiter;
 import com.vucelich.sablesafelanding.sim.ColliderFeedPlanner;
@@ -37,8 +38,30 @@ public final class ColliderFeedRuntime {
     /** Claimed contraptions, including ones whose collider was never uploaded. */
     private static final Map<String, AbstractContraptionEntity> CLAIMS = new HashMap<>();
     private static final Set<String> KINEMATIC_LOGGED = new HashSet<>();
+    /** Game tick each dimension was last planned. Later physics substeps in that tick skip it. */
+    private static final Map<String, Long> SYNCED_AT = new HashMap<>();
+    /** Shape hash per contraption, kept until its block count changes or it is rechecked. */
+    private static final Map<Contraption, long[]> HASHES = new java.util.WeakHashMap<>();
+    /** Contraptions whose collider could not be built, with the shape hash that failed. */
+    private static final Map<String, Long> FAILED = new HashMap<>();
+    /** Ticks between rehashes of an unchanged block count, so a swapped block still rebuilds. */
+    private static final long REHASH_TICKS = 1_200;
+    /** A settled dimension is fully re-planned at least this often. */
+    private static final long REPLAN_TICKS = 20;
+    /** Per dimension: the live set it was last planned for, when, and whether every slot was a keep. */
+    private static final Map<String, long[]> PLANNED = new HashMap<>();
     private static final RateLimiter FAILURE_LOGS = new RateLimiter(5_000_000_000L);
     private static boolean deferredWarning;
+    private static boolean hookRan;
+    /** Decks the hook offered that are not taken over yet. Sable's collider stays until they are. */
+    private static final Map<String, AbstractContraptionEntity> PENDING = new HashMap<>();
+    /** Learned cost of one upload per contraption block. */
+    private static final com.vucelich.sablesafelanding.sim.CostEstimate UPLOAD_COST =
+            new com.vucelich.sablesafelanding.sim.CostEstimate(200.0, 5.0, 64);
+    /** Game tick and dimension of the last upload, so at least one per tick always goes through. */
+    private static final Map<String, Long> UPLOADED_AT = new HashMap<>();
+    private static long deferredUploads;
+    private static long uploads;
 
     private ColliderFeedRuntime() {
     }
@@ -47,9 +70,27 @@ public final class ColliderFeedRuntime {
      * The contraption mixin ran for this entity. Server thread only.
      */
     public static void noteHook(AbstractContraptionEntity entity) {
+        hookRan = true;
+    }
+
+    /**
+     * The tick hook saw a world deck this mod should own. It is taken over later, in the feed's
+     * own tick and inside the budget, by {@link #apply}. Server thread only.
+     */
+    public static void offer(AbstractContraptionEntity entity) {
         if (onServerThread(entity)) {
-            HOOKED.add(entity.getUUID().toString());
+            PENDING.put(entity.getUUID().toString(), entity);
         }
+    }
+
+    /** Collider uploads put off to a later tick because the budget was used up. */
+    public static long deferredUploads() {
+        return deferredUploads;
+    }
+
+    /** Collider uploads done since startup. */
+    public static long uploads() {
+        return uploads;
     }
 
     /**
@@ -64,7 +105,7 @@ public final class ColliderFeedRuntime {
     }
 
     public static boolean hookSeen() {
-        return !HOOKED.isEmpty();
+        return hookRan || !HOOKED.isEmpty();
     }
 
     public static boolean isClaimed(String id) {
@@ -114,10 +155,22 @@ public final class ColliderFeedRuntime {
         CLAIMED.clear();
         CLAIMS.clear();
         KINEMATIC_LOGGED.clear();
+        SYNCED_AT.clear();
+        PLANNED.clear();
+        HASHES.clear();
+        FAILED.clear();
+        PENDING.clear();
+        FAR_CHECKED_AT.clear();
+        UPLOADED_AT.clear();
     }
 
     public static void forgetDimension(String dimension) {
         PLANNERS.remove(dimension);
+        SYNCED_AT.remove(dimension);
+        PLANNED.remove(dimension);
+        UPLOADED_AT.remove(dimension);
+        PENDING.values().removeIf(entity -> entity == null || !(entity.level() instanceof ServerLevel server)
+                || server.dimension().location().toString().equals(dimension));
         Map<String, FedContraptionCollider> fed = FED.remove(dimension);
         if (fed != null) {
             HOOKED.removeAll(fed.keySet());
@@ -153,6 +206,15 @@ public final class ColliderFeedRuntime {
     }
 
     public static void onPrePhysics(ForgeSablePrePhysicsTickEvent event) {
+        long start = System.nanoTime();
+        try {
+            prePhysics(event);
+        } finally {
+            PerfMeter.add(PerfMeter.Part.FEED, System.nanoTime() - start);
+        }
+    }
+
+    private static void prePhysics(ForgeSablePrePhysicsTickEvent event) {
         SubLevelPhysicsSystem system = event.getPhysicsSystem();
         if (system == null || !(system.getLevel() instanceof ServerLevel level)) {
             return;
@@ -166,6 +228,22 @@ public final class ColliderFeedRuntime {
             // A config edit can turn the master switch or the feed off without the command.
             if (!config.enabled() || !config.feedColliders()) {
                 disarm(level);
+                return;
+            }
+            String dimension = level.dimension().location().toString();
+            Long synced = SYNCED_AT.get(dimension);
+            if (synced != null && synced == level.getGameTime()) {
+                // Planned this tick already. The kinematic samples are per game tick too.
+                return;
+            }
+            SYNCED_AT.put(dimension, level.getGameTime());
+            long[] planned = PLANNED.get(dimension);
+            long now = level.getGameTime();
+            long window = planned != null && planned[2] == 2L ? TAKEOVER_RECHECK : REPLAN_TICKS;
+            if (planned != null && planned[2] >= 1L && planned[0] == liveKey(level)
+                    && now >= planned[1] && now - planned[1] < window) {
+                // Same contraptions as last tick and every one already fed: only the motion samples.
+                sample(level);
                 return;
             }
             sync(level, system.getPipeline());
@@ -199,6 +277,7 @@ public final class ColliderFeedRuntime {
                 }
             }
             restoreClaims(dimension);
+            PENDING.values().removeIf(entity -> entity == null || entity.level() == level);
         } catch (RuntimeException ex) {
             logFailure(ex);
         }
@@ -256,6 +335,7 @@ public final class ColliderFeedRuntime {
             CLAIMS.remove(id);
             CLAIMED.remove(id);
         }
+        PENDING.entrySet().removeIf(entry -> gone(entry.getValue(), dimension));
     }
 
     private static boolean gone(AbstractContraptionEntity entity, String dimension) {
@@ -353,6 +433,8 @@ public final class ColliderFeedRuntime {
         }
         CLAIMS.clear();
         CLAIMED.clear();
+        PENDING.clear();
+        FAR_CHECKED_AT.clear();
     }
 
     private static void sync(ServerLevel level, PhysicsPipeline pipeline) {
@@ -364,8 +446,9 @@ public final class ColliderFeedRuntime {
         Map<String, AbstractContraptionEntity> entities = new HashMap<>();
         List<FeedRequest> requests = new ArrayList<>();
         int seen = 0;
-        for (Entity candidate : level.getAllEntities()) {
-            if (!(candidate instanceof AbstractContraptionEntity entity)) {
+        long now = level.getGameTime();
+        for (AbstractContraptionEntity entity : LiveContraptions.in(level)) {
+            if (entity == null || entity.isRemoved() || entity.level() != level) {
                 continue;
             }
             if (seen++ >= MAX_CONTRAPTIONS) {
@@ -377,12 +460,55 @@ public final class ColliderFeedRuntime {
                 continue;
             }
             String id = entity.getUUID().toString();
+            long hash = shapeHash(contraption, now);
+            Long failed = FAILED.get(id);
+            if (failed != null && failed == hash) {
+                // This shape could not be built before. Do not rebuild it every tick.
+                continue;
+            }
+            FAILED.remove(id);
             entities.put(id, entity);
             boolean inWorld = Sable.HELPER.getContaining(entity) == null;
-            requests.add(new FeedRequest(id, kind, ContraptionKinds.shapeHash(contraption), inWorld, entity.isAlive()));
+            requests.add(new FeedRequest(id, kind, hash, inWorld, entity.isAlive()));
         }
+        boolean settled = true;
+        boolean farWaiting = false;
         for (FeedAction action : planner.plan(requests, config.feedColliders())) {
+            long lazyBefore = lazyWaits;
             apply(pipeline, planner, fed, entities, action);
+            // A deck left on Sable's collider because no ship is near does not keep the
+            // dimension re-planning every tick. It is rechecked on the next full plan.
+            if (lazyWaits != lazyBefore) {
+                farWaiting = true;
+            } else if (action.type() != FeedAction.Type.KEEP) {
+                settled = false;
+            }
+        }
+        for (FeedRequest request : requests) {
+            if (request.inWorld() && !fed.containsKey(request.id()) && !FAR_CHECKED_AT.containsKey(request.id())) {
+                // Waiting for its claim or its collider: keep planning every tick.
+                settled = false;
+            }
+        }
+        PLANNED.put(dimension, new long[]{liveKey(level), now, !settled ? 0L : farWaiting ? 2L : 1L});
+        sample(level);
+    }
+
+    /** Identity of the live contraption set: its size and the entities in it. */
+    private static long liveKey(ServerLevel level) {
+        java.util.Set<AbstractContraptionEntity> live = LiveContraptions.in(level);
+        long key = live.size();
+        for (AbstractContraptionEntity entity : live) {
+            key += 0x9E3779B97F4A7C15L * System.identityHashCode(entity);
+        }
+        return key;
+    }
+
+    /** Once per game tick: each fed collider records where its contraption is. */
+    private static void sample(ServerLevel level) {
+        Map<String, FedContraptionCollider> fed = FED.get(level.dimension().location().toString());
+        if (fed == null || fed.isEmpty()) {
+            return;
         }
         long time = level.getGameTime();
         for (Map.Entry<String, FedContraptionCollider> entry : fed.entrySet()) {
@@ -413,23 +539,60 @@ public final class ColliderFeedRuntime {
             case ADD, REBUILD -> {
                 AbstractContraptionEntity entity = entities.get(action.id());
                 if (!CLAIMED.contains(action.id())) {
-                    planner.forget(action.id());
-                    if (entity != null && entity.tickCount > 0) {
-                        warnDeferred();
+                    AbstractContraptionEntity offered = PENDING.get(action.id());
+                    if (offered == null || offered != entity || entity == null) {
+                        planner.forget(action.id());
+                        if (entity != null && entity.tickCount > 0) {
+                            warnDeferred();
+                        }
+                        return;
                     }
-                    return;
+                    if (entity.level() instanceof ServerLevel nearLevel && !shipNearForTakeover(nearLevel, entity)) {
+                        // No ship anywhere near: Sable's own collider is enough until one comes.
+                        planner.forget(action.id());
+                        lazyWaits++;
+                        return;
+                    }
+                    if (!(entity.level() instanceof ServerLevel serverLevel) || !uploadFits(serverLevel, entity)) {
+                        // Over budget: Sable's own collider stays on this deck until a later tick.
+                        planner.forget(action.id());
+                        deferredUploads++;
+                        return;
+                    }
+                    if (!Boolean.TRUE.equals(sableInitialized(entity))) {
+                        // Sable has not added its own body yet; try again next tick.
+                        planner.forget(action.id());
+                        return;
+                    }
+                    PENDING.remove(action.id());
+                    claim(entity);
+                    displaceSable(entity);
                 }
                 if (action.type() == FeedAction.Type.REBUILD) {
                     remove(pipeline, fed, action.id());
                 }
+                long buildStart = System.nanoTime();
                 FedContraptionCollider collider = entity == null ? null : FedContraptionCollider.tryCreate(entity);
                 if (collider == null || pipeline == null) {
                     planner.forget(action.id());
+                    if (entity != null && collider == null) {
+                        FAILED.put(action.id(), action.shapeHash());
+                    }
                     return;
                 }
                 try {
                     pipeline.add(collider);
                     fed.put(action.id(), collider);
+                    long used = System.nanoTime() - buildStart;
+                    int blocks = entity.getContraption().getBlocks().size();
+                    UPLOAD_COST.observe(Math.max(1, blocks), used);
+                    uploads++;
+                    if (entity.level() instanceof ServerLevel serverLevel) {
+                        CarryRuntime.budget(serverLevel).charge(used);
+                        UPLOADED_AT.put(serverLevel.dimension().location().toString(), serverLevel.getGameTime());
+                    }
+                    SableSafeLanding.LOGGER.info("LIVE feed collider {} blocks={} ms={}", action.id(), blocks,
+                            String.format(java.util.Locale.ROOT, "%.2f", used / 1_000_000.0));
                 } catch (RuntimeException ex) {
                     planner.forget(action.id());
                     logFailure(ex);
@@ -439,6 +602,80 @@ public final class ColliderFeedRuntime {
             case KEEP -> {
             }
         }
+    }
+
+    /**
+     * The contraption's shape hash. Recomputed when its block count changes, and otherwise at
+     * most every {@link #REHASH_TICKS}, instead of every physics substep.
+     */
+    private static long shapeHash(Contraption contraption, long now) {
+        // A Create contraption's blocks are fixed while it is assembled, and a re-assembly is a new
+        // Contraption object. Identity and block count find every change without reading a block,
+        // so there is no per-block rehash and no once-a-minute recheck spike.
+        return System.identityHashCode(contraption) * 0x9E3779B97F4A7C15L + contraption.getBlocks().size();
+    }
+
+    /** Blocks around a deck within which a ship makes the mod take the deck's collider over. */
+    static final double TAKEOVER_REACH = 48.0;
+    /** Seconds of a ship's own speed added to that reach. */
+    static final double TAKEOVER_SECONDS = 2.0;
+    /** Ticks between rechecks of a deck that had no ship near. */
+    static final long TAKEOVER_RECHECK = 10;
+    private static final Map<String, Long> FAR_CHECKED_AT = new HashMap<>();
+    private static long lazyWaits;
+
+    /** Decks left on Sable's own collider for a tick because no ship was near. */
+    public static long lazyWaits() {
+        return lazyWaits;
+    }
+
+    /**
+     * With idleSleep on, a deck's collider is only taken over while a ship is within
+     * {@link #TAKEOVER_REACH} blocks plus {@link #TAKEOVER_SECONDS} of its speed. A deck that
+     * nobody is near keeps Sable's own collider, so loading or assembling far-away contraptions
+     * does not pay for a second collider build. A far deck is rechecked every
+     * {@link #TAKEOVER_RECHECK} ticks.
+     */
+    private static boolean shipNearForTakeover(ServerLevel level, AbstractContraptionEntity entity) {
+        if (!SafeLandingConfig.idleSleep()) {
+            return true;
+        }
+        String key = entity.getUUID().toString();
+        long now = level.getGameTime();
+        Long checked = FAR_CHECKED_AT.get(key);
+        if (checked != null && now >= checked && now - checked < TAKEOVER_RECHECK) {
+            return false;
+        }
+        Aabb bounds = CarryRuntime.broadphaseBounds(entity);
+        if (DeckGate.anyShipWithin(level, bounds, TAKEOVER_REACH, TAKEOVER_SECONDS)) {
+            FAR_CHECKED_AT.remove(key);
+            return true;
+        }
+        if (FAR_CHECKED_AT.size() > 4096) {
+            FAR_CHECKED_AT.clear();
+        }
+        FAR_CHECKED_AT.put(key, now);
+        return false;
+    }
+
+    /**
+     * One upload per dimension per tick always goes through, so a deck is never stuck on
+     * Sable's collider. More in the same tick only when the learned cost fits the budget.
+     */
+    private static boolean uploadFits(ServerLevel level, AbstractContraptionEntity entity) {
+        String dimension = level.dimension().location().toString();
+        Long last = UPLOADED_AT.get(dimension);
+        if (last == null || last != level.getGameTime()) {
+            return true;
+        }
+        int blocks = entity.getContraption() == null ? 1 : entity.getContraption().getBlocks().size();
+        com.vucelich.sablesafelanding.sim.TickBudget budget = CarryRuntime.budget(level);
+        boolean fits = budget.allowsBulk(UPLOAD_COST.estimate(Math.max(1, blocks)));
+        if (!fits) {
+            budget.defer();
+            UPLOAD_COST.relax();
+        }
+        return fits;
     }
 
     private static void remove(PhysicsPipeline pipeline, Map<String, FedContraptionCollider> fed, String id) {

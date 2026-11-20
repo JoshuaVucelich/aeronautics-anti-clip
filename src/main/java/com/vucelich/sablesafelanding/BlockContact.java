@@ -22,6 +22,11 @@ import java.util.List;
  */
 public final class BlockContact {
     static final int MAX_BLOCKS = 128;
+    /**
+     * Most cells, air included, read for one ship in one call. A large sparse ship would
+     * otherwise read its whole bounding volume to find 128 solid blocks.
+     */
+    static final int MAX_CELLS = 32_768;
 
     private BlockContact() {
     }
@@ -31,6 +36,7 @@ public final class BlockContact {
             return false;
         }
         int seen = 0;
+        int cells = 0;
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
         for (PlotChunkHolder holder : subLevel.getPlot().getLoadedChunks()) {
             LevelChunk chunk = holder.getChunk();
@@ -42,6 +48,9 @@ public final class BlockContact {
             for (int y = local.minY(); y <= local.maxY() && seen < MAX_BLOCKS; y++) {
                 for (int x = local.minX(); x <= local.maxX() && seen < MAX_BLOCKS; x++) {
                     for (int z = local.minZ(); z <= local.maxZ() && seen < MAX_BLOCKS; z++) {
+                        if (++cells > MAX_CELLS) {
+                            return false;
+                        }
                         cursor.set(pos.getMinBlockX() + x, y, pos.getMinBlockZ() + z);
                         BlockState state = chunk.getBlockState(cursor);
                         if (state.isAir()) {
@@ -92,6 +101,7 @@ public final class BlockContact {
             return new Touch(CarryGate.Contact.NONE, null);
         }
         int seen = 0;
+        int cells = 0;
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
         for (int y = minY; y <= maxY; y++) {
             for (PlotChunkHolder holder : holders) {
@@ -106,6 +116,9 @@ public final class BlockContact {
                 ChunkPos pos = chunk.getPos();
                 for (int x = local.minX(); x <= local.maxX(); x++) {
                     for (int z = local.minZ(); z <= local.maxZ(); z++) {
+                        if (++cells > MAX_CELLS) {
+                            return new Touch(CarryGate.Contact.INCONCLUSIVE, null);
+                        }
                         cursor.set(pos.getMinBlockX() + x, y, pos.getMinBlockZ() + z);
                         if (chunk.getBlockState(cursor).isAir()) {
                             continue;

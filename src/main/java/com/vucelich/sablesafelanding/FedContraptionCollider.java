@@ -59,6 +59,10 @@ public final class FedContraptionCollider implements KinematicContraption {
         if (entity.getContraption() == null || entity.getContraption().getBlocks().isEmpty()) {
             return null;
         }
+        FedContraptionCollider reused = reuseSable(entity);
+        if (reused != null) {
+            return reused;
+        }
         BoundingBox3i bounds = null;
         for (BlockPos pos : entity.getContraption().getBlocks().keySet()) {
             if (bounds == null) {
@@ -75,6 +79,28 @@ public final class FedContraptionCollider implements KinematicContraption {
             return null;
         }
         return new FedContraptionCollider(entity, bounds, mass);
+    }
+
+    /**
+     * Sable already built this contraption's mass and bounds when it added its own body, the same
+     * tick or earlier, with the same block getter and the same bounds. Reusing them makes taking
+     * the deck over cost no block work at all. Null when Sable has not built them.
+     */
+    private static FedContraptionCollider reuseSable(AbstractContraptionEntity entity) {
+        if (!(entity instanceof KinematicContraption sable)) {
+            return null;
+        }
+        try {
+            MassTracker mass = sable.sable$getMassTracker();
+            if (mass == null || mass.getCenterOfMass() == null) {
+                return null;
+            }
+            BoundingBox3i bounds = new BoundingBox3i(0, 0, 0, 0, 0, 0);
+            sable.sable$getLocalBounds(bounds);
+            return new FedContraptionCollider(entity, bounds, mass);
+        } catch (RuntimeException ex) {
+            return null;
+        }
     }
 
     @Override

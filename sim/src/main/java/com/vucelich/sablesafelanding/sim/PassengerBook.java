@@ -20,6 +20,10 @@ public final class PassengerBook {
         seats.clear();
     }
 
+    public boolean isEmpty() {
+        return seats.isEmpty();
+    }
+
     public void remove(String childId) {
         if (childId != null) {
             seats.remove(childId);
